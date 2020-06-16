@@ -45,9 +45,9 @@ proc sendRequestProc(blip: Blip): SendProc =
         assert msg.messageType == kRequestType
         let msgNo = ++blip.outNumber
         msg.number = msgNo
-        blip.outbox.push(msg)
         let response = newPendingResponse(msg)
         blip.incomingResponses[msgNo] = response
+        blip.outbox.push(msg)
         return response.createCompletionFuture
 
 proc sendResponseProc(blip: Blip): SendProc =
@@ -71,14 +71,22 @@ proc sendLoop(blip: Blip) {.async.} =
         let msg = await blip.outbox.pop()
         if msg == nil:
             return
-        let frame = msg.nextFrame(4096)
-        await blip.socket.send(frame)
+        let frameSize = if msg.priority == Urgent: 32768 else: 4096
+        let frame = msg.nextFrame(frameSize)
         if not msg.finished:
             blip.outbox.push(msg)
+
+        let f = blip.socket.send(frame)
+        yield f
+        if f.failed:
+            if f.error.name != "WebSocketClosedError":
+                echo "*** Transport send error: ", f.error.name, " ", f.error.msg
+            break
 
 # Receiving:
 
 proc pendingRequest(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
+    ## Returns the MessageIn for an incoming request frame.
     if msgNo == blip.inNumber + 1:
         # This is the start of a new request:
         blip.inNumber = msgNo
@@ -98,7 +106,8 @@ proc pendingRequest(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
        raise newException(BlipException, "Invalid incoming message number (too high)")
 
 proc pendingResponse(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
-    # Look up my request with this number:
+    ## Returns the MessageIn for an incoming response frame.
+    # Look up the response object with this number:
     let msg = blip.incomingResponses[msgNo]
     if msg == nil:
         raise newException(BlipException, "Invalid incoming response number")
@@ -118,11 +127,16 @@ proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
 
 proc handleFrame(blip: Blip, frame: openarray[byte]) =
     # Read the flags and message number:
-    assert frame.len >= 2
+    if frame.len < 2:
+        raise newException(BlipException, "Impossibly small frame")
     let flags = frame[0]
+    if (flags and kCompressed) != 0:
+        raise newException(BlipException, "Compressed frames are not supported yet")
     var pos = 1
     let msgNo = MessageNo(getVarint(frame, pos))
     var msgType = MessageType(flags and kTypeMask)
+    if msgType > kErrorType:
+        raise newException(BlipException, "Unsupported frame type")
     # Look up or create an IncomingMessage object:
     let msg = if msgType == kRequestType:
         blip.pendingRequest(flags, msgNo)
@@ -137,11 +151,18 @@ proc receiveLoop(blip: Blip) {.async.} =
     ## Async loop that receives WebSocket messages, reads them as BLIP frames, and assembles
     ## them into messages, until the connection is closed.
     while blip.socket.canReceive:
-        let frame = await blip.socket.receive()
-        if frame.len > 0:
-            blip.handleFrame(frame)
-        else:
+        let f = blip.socket.receive()
+        yield f
+        if f.failed:
+            if f.error.name != "WebSocketClosedError":
+                echo "*** Transport receive error: ", f.error.name, " ", f.error.msg
             break
+        else:
+            let frame = f.read
+            if frame.len > 0:
+                blip.handleFrame(frame)
+            else:
+                break
 
 proc run*(blip: Blip): Future[void] =
     ## Runs the Blip's asynchronous send and receive loops.

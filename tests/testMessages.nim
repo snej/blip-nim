@@ -21,8 +21,9 @@ test "Outgoing Message":
     buf["Language"] = "French"
     buf.body = "Your mother was a hamster"
 
-    var msg = newMessageOut(buf, kRequestType, MessageNo(1), Normal, false)
+    var msg = newMessageOut(buf)
     check msg != nil
+    msg.number = MessageNo(1)
     check msg.priority == Normal
     check not msg.noReply
     check msg.messageType == kRequestType
@@ -63,7 +64,8 @@ test "Frame Sizes":
 
     for frameSize in 5..100:
         #echo frameSize, " byte frames"
-        var msgOut = newMessageOut(buf, kRequestType, MessageNo(1), Normal, false)
+        var msgOut = newMessageOut(buf)
+        msgOut.number = MessageNo(1)
         var msgIn: MessageIn = nil
         while not msgOut.finished:
             var frame = msgOut.nextFrame(frameSize)

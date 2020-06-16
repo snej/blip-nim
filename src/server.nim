@@ -11,6 +11,7 @@ when isMainModule:
         echo "    \"", msg.body, "\""
 
         if not msg.noReply:
+            echo "Sending response..."
             var response = msg.createResponse
             response.body = "Hello, client!"
             response["OK"] = "true"
@@ -25,9 +26,8 @@ when isMainModule:
             var blip = newBlip(t)
             blip.setDefaultHandler(proc(msg: MessageIn) = handleTestMessage(msg))
             await blip.run()
-            echo "...Closed Blip"
-        await req.respond(Http404, "Nope", newHttpHeaders())
+            echo "...Closed Blip\c\l"
+        else:
+            await req.respond(Http404, "Nope", newHttpHeaders())
 
     waitFor server.serve(Port(9001), cb)
-
-

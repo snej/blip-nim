@@ -12,11 +12,11 @@ type
 proc push*(ob: var Outbox, msg: MessageOut) =
     ## Adds (or returns) a MessageOut to the outbox for processing.
     assert not ob.closed
-    if ob.waiting != nil:
+    let waiter = ob.waiting
+    if waiter != nil:
         assert ob.queue.len == 0
-        let f = ob.waiting
         ob.waiting = nil
-        f.complete(msg)
+        waiter.complete(msg)
     else:
         ob.queue.add(msg)
 
