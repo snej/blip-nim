@@ -1,7 +1,7 @@
 # This is just an example to get you started. A typical hybrid package
 # uses this file as the main entry point of the application.
 
-import blip/message, blip/outbox, blip/protocol, blip/transport, blip/private/varint
+import blip/message, blip/outbox, blip/protocol, blip/transport, blip/private/crc32, blip/private/varint
 import asyncdispatch, tables
 
 
@@ -13,6 +13,8 @@ type
         inNumber: MessageNo             # Number of latest incoming message
         incomingRequests: MessageMap    # Incoming partial request messages
         incomingResponses: MessageMap   # Incoming partial response messages
+        outChecksum: CRC32
+        inChecksum: CRC32
         defaultHandler: Handler         # Default callback to handle incoming requests
         handlers: Table[string, Handler]# Callbacks for requests with specific "Profile"s
 
@@ -72,7 +74,7 @@ proc sendLoop(blip: Blip) {.async.} =
         if msg == nil:
             return
         let frameSize = if msg.priority == Urgent: 32768 else: 4096
-        let frame = msg.nextFrame(frameSize)
+        let frame = msg.nextFrame(frameSize, blip.outChecksum)
         if not msg.finished:
             blip.outbox.push(msg)
 
@@ -143,7 +145,7 @@ proc handleFrame(blip: Blip, frame: openarray[byte]) =
     else:
         blip.pendingResponse(flags, msgNo)
     # Append the frame to the message, and dispatch it if it's complete:
-    msg.addFrame(flags, frame[pos .. ^1])
+    msg.addFrame(flags, frame[pos .. ^1], blip.inChecksum)
     if (flags and kMoreComing) == 0 and msgType == kRequestType:
             blip.dispatchIncomingRequest(msg)
 

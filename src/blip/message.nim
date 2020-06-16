@@ -1,8 +1,8 @@
 # message.nim
 
 import protocol
-import private/varint
-import asyncdispatch, strformat, strutils
+import private/varint, private/crc32
+import asyncdispatch, endians, strformat, strutils
 
 proc messageType(flags: byte): MessageType =
     return MessageType(flags and kTypeMask)
@@ -111,11 +111,12 @@ proc newMessageOut*(buf: sink MessageBuf): MessageOut =
 proc finished*(msg: MessageOut): bool =
     msg.bytesSent >= msg.data.len
 
-proc nextFrame*(msg: MessageOut, maxLen: int): seq[byte] =
+proc nextFrame*(msg: MessageOut, maxLen: int, crc32: var CRC32): seq[byte] =
     # [INTERNAL ONLY] Returns the next frame to send.
     # After the last frame, the ``kMoreComing`` flag will be cleared.
     var flags = msg.flags
-    let metaLen = 1 + sizeOfVarint(uint64(msg.number))
+    let metaLen = 1 + sizeOfVarint(uint64(msg.number)) + 4
+    assert maxLen > metaLen
     var payloadLen = min(msg.data.len - msg.bytesSent, maxLen - metaLen)
     let newBytesSent = msg.bytesSent + payloadLen
     assert newBytesSent <= len(msg.data)
@@ -125,12 +126,20 @@ proc nextFrame*(msg: MessageOut, maxLen: int): seq[byte] =
     var frame = newSeqOfCap[byte](metaLen + payloadLen)
     frame.add(flags)
     frame.addVarint(uint64(msg.number))
-    assert frame.len == metaLen
+    assert frame.len == metaLen - 4
 
     echo &">>> Send frame: {msg} {flagsToString(flags)} {msg.bytesSent}..<{newBytesSent-1}"
 
-    frame.add(msg.data[msg.bytesSent .. newBytesSent-1])
+    crc32 += msg.data[msg.bytesSent ..< newBytesSent]
+    frame.add(msg.data[msg.bytesSent ..< newBytesSent])
     msg.bytesSent = newBytesSent
+
+    # Finally add the CRC32 checksum:
+    let checksum = crc32.result
+    var beChecksum: array[0..3, byte]
+    bigEndian32(addr beChecksum, unsafeAddr checksum)
+    frame.add(beChecksum)
+    assert frame.len <= maxLen
     return frame
 
 
@@ -234,11 +243,21 @@ proc replyWithError*(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorM
     ## Sends an error response to this message.
     msg.createErrorResponse(domain, code, errorMessage).sendNoReply()
 
-proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte]) =
+proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte], crc32: var CRC32) =
     # [INTERNAL ONLY] Assembles the incoming message a frame at a time.
+    # Note: `bytes` does not include the frame flags and message number.
+
+    # First verify the checksum:
+    let bytesLen = bytes.len - 4
+    assert bytesLen > 0
+    crc32 += bytes[0 ..< bytesLen]
+    var checksum: uint32
+    bigEndian32(unsafeAddr checksum, unsafeAddr bytes[bytesLen])
+    if checksum != crc32.result:
+        raise newException(BlipException, "Frame has invalid checksum")
 
     let bytesSoFar = msg.propertyBuf.len + msg.body.len
-    echo &"<<< Rcvd frame: {msg} {flagsToString(flags)} {bytesSoFar}..<{bytesSoFar+bytes.len}"
+    echo &"<<< Rcvd frame: {msg} {flagsToString(flags)} {bytesSoFar}..<{bytesSoFar+bytesLen}"
 
     var pos = 0;
     if messageType(flags) != msg.messageType:
@@ -257,14 +276,14 @@ proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte]) =
         msg.state = ReadingProperties
     if msg.state == ReadingProperties:
         # There are still bytes of properties left to read:
-        let newPos = min(pos + msg.propertiesRemaining, bytes.len)
-        msg.propertyBuf.add(bytes[pos .. newPos-1])
+        let newPos = min(pos + msg.propertiesRemaining, bytesLen)
+        msg.propertyBuf.add(bytes[pos ..< newPos])
         msg.propertiesRemaining -= (newPos - pos)
         pos = newPos
         if msg.propertiesRemaining == 0:
             msg.state = ReadingBody
     if msg.state == ReadingBody:
-        msg.body.add(bytes[pos..^1])
+        msg.body.add(bytes[pos ..< bytesLen])
 
     if (flags and kMoreComing) == 0:
         if msg.state < ReadingBody:

@@ -19,6 +19,7 @@ proc push*(ob: var Outbox, msg: MessageOut) =
         waiter.complete(msg)
     else:
         ob.queue.add(msg)
+        #TODO: Implement special placement of urgent messages [BLIP 3.2]
 
 proc pop*(ob: var Outbox): Future[MessageOut] =
     ## Removes and returns the first message. If empty, waits until a message is added.
