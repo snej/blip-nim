@@ -1,26 +1,32 @@
 # This is just an example to get you started. A typical hybrid package
 # uses this file as the main entry point of the application.
 
-import blip/message, blip/outbox, blip/protocol, blip/transport, blip/private/crc32, blip/private/varint
-import asyncdispatch, tables
+import blip/[message, outbox, protocol, transport]
+import blip/private/[crc32, log, varint]
+import asyncdispatch, strformat, tables
 
 
 type
     Blip* = ref object
         socket: Transport               # The WebSocket
         outbox: Outbox                  # Messages being sent
+        icebox: Icebox                  # Messages paused until an Ack is received
         outNumber: MessageNo            # Number of latest outgoing message
         inNumber: MessageNo             # Number of latest incoming message
         incomingRequests: MessageMap    # Incoming partial request messages
         incomingResponses: MessageMap   # Incoming partial response messages
-        outChecksum: CRC32
-        inChecksum: CRC32
+        outChecksum: CRC32Accumulator
+        inChecksum: CRC32Accumulator
         defaultHandler: Handler         # Default callback to handle incoming requests
         handlers: Table[string, Handler]# Callbacks for requests with specific "Profile"s
 
     MessageMap = Table[MessageNo, MessageIn]
 
     Handler* = proc(msg: MessageIn)
+
+proc setBLIPLogLevel*(level: int) =
+    ## Sets the level of logging: 0 is errors only, 1 includes warnings, 2 info, 3 verbose, 4 debug
+    CurrentLogLevel = LogLevel(level)
 
 proc newBlip*(socket: Transport): Blip =
     ## Creates a new Blip object from a WebSocket. You still need to call ``run`` on it.
@@ -36,6 +42,7 @@ proc setDefaultHandler*(blip: Blip, handler: Handler) =
 
 proc close*(blip: Blip) {.async.} =
     ## Shuts down the Blip object.
+    log Info, "BLIP closing"
     blip.outbox.close()
     await blip.socket.close()
 
@@ -47,10 +54,13 @@ proc sendRequestProc(blip: Blip): SendProc =
         assert msg.messageType == kRequestType
         let msgNo = ++blip.outNumber
         msg.number = msgNo
-        let response = newPendingResponse(msg)
-        blip.incomingResponses[msgNo] = response
         blip.outbox.push(msg)
-        return response.createCompletionFuture
+        if msg.noReply:
+            return nil
+        else:
+            let response = newPendingResponse(msg)
+            blip.incomingResponses[msgNo] = response
+            return response.createCompletionFuture
 
 proc sendResponseProc(blip: Blip): SendProc =
     # Returns a proc that will send a MessageOut as a response
@@ -73,17 +83,22 @@ proc sendLoop(blip: Blip) {.async.} =
         let msg = await blip.outbox.pop()
         if msg == nil:
             return
-        let frameSize = if msg.priority == Urgent: 32768 else: 4096
+        let frameSize = if (msg.priority == Urgent or blip.outbox.empty): 32768 else: 4096
         let frame = msg.nextFrame(frameSize, blip.outChecksum)
         if not msg.finished:
-            blip.outbox.push(msg)
+            if msg.needsAck:
+                log Info, "Freezing {msg} until acked"
+                blip.icebox.add(msg)
+            else:
+                blip.outbox.push(msg)
 
         let f = blip.socket.send(frame)
         yield f
         if f.failed:
             if f.error.name != "WebSocketClosedError":
-                echo "*** Transport send error: ", f.error.name, " ", f.error.msg
+                log Error, "Transport send error: {f.error.name} {f.error.msg}"
             break
+
 
 # Receiving:
 
@@ -98,7 +113,7 @@ proc pendingRequest(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
         return msg
     elif msgNo <= blip.inNumber:
         # This is a continuation frame of a request:
-        let msg = blip.incomingRequests[msgNo]
+        let msg = blip.incomingRequests.getOrDefault(msgNo)
         if msg == nil:
             raise newException(BlipException, "Invalid incoming message number (duplicate)")
         if (flags and kMoreComing) == 0:
@@ -110,7 +125,7 @@ proc pendingRequest(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
 proc pendingResponse(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
     ## Returns the MessageIn for an incoming response frame.
     # Look up the response object with this number:
-    let msg = blip.incomingResponses[msgNo]
+    let msg = blip.incomingResponses.getOrDefault(msgNo)
     if msg == nil:
         raise newException(BlipException, "Invalid incoming response number")
     if (flags and kMoreComing) == 0:
@@ -121,33 +136,60 @@ proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
     let profile = msg.profile
     let handler = blip.handlers.getOrDefault(profile, blip.defaultHandler)
     if handler != nil:
-        handler(msg)
+        try:
+            handler(msg)
+        except:
+            log Error, "Handler for {msg}, profile '{profile}', raised exception: {getCurrentExceptionMsg()}"
+            if not msg.noReply:
+                msg.replyWithError("BLIP", 501, "Handler failed unexpectedly")
     elif not msg.noReply:
         msg.replyWithError("BLIP", 404, "No handler")
     else:
-        echo "(No handler for incoming noreply request, profile='", profile, "')"
+        log Warning, "No handler for incoming noreply request, profile='{profile}'"
 
 proc handleFrame(blip: Blip, frame: openarray[byte]) =
     # Read the flags and message number:
     if frame.len < 2:
-        raise newException(BlipException, "Impossibly small frame")
+        log Error, "Received impossibly small frame"
+        return
     let flags = frame[0]
     if (flags and kCompressed) != 0:
         raise newException(BlipException, "Compressed frames are not supported yet")
     var pos = 1
     let msgNo = MessageNo(getVarint(frame, pos))
     var msgType = MessageType(flags and kTypeMask)
-    if msgType > kErrorType:
-        raise newException(BlipException, "Unsupported frame type")
-    # Look up or create an IncomingMessage object:
-    let msg = if msgType == kRequestType:
-        blip.pendingRequest(flags, msgNo)
-    else:
-        blip.pendingResponse(flags, msgNo)
-    # Append the frame to the message, and dispatch it if it's complete:
-    msg.addFrame(flags, frame[pos .. ^1], blip.inChecksum)
-    if (flags and kMoreComing) == 0 and msgType == kRequestType:
+    let body = frame[pos .. ^1]
+    log Verbose, "<<< Rcvd frame: {msgType}#{uint(msgNo)} {flagsToString(flags)} {frame.len-pos} bytes"
+
+    if msgType < kAckRequestType:
+        # Handle an incoming request/response frame:
+        # Look up or create the IncomingMessage object:
+        let msg = if msgType == kRequestType:
+            blip.pendingRequest(flags, msgNo)
+        else:
+            blip.pendingResponse(flags, msgNo)
+        # Append the frame to the message, and dispatch it if it's complete:
+        let ack = msg.addFrame(flags, body, blip.inChecksum)
+        if ack != nil:
+            blip.outbox.push(ack)
+        if (flags and kMoreComing) == 0 and msgType == kRequestType:
             blip.dispatchIncomingRequest(msg)
+    else:
+        # Handle an incoming ACK:
+        let findType = if msgType == kAckRequestType: kRequestType else: kResponseType
+        let msg = blip.outbox.find(findType, msgNo)
+        if msg != nil:
+            msg.handleAck(body)
+        else:
+            let (i, msg) = blip.icebox.find(findType, msgNo)
+            if msg != nil:
+                msg.handleAck(body)
+                if not msg.needsAck:
+                    log Info, "Unfreezing acked {msg}"
+                    blip.icebox.del(i)
+                    blip.outbox.push(msg)
+            else:
+                log Warning, "Received {$msgType} for unknown message #{uint64(msgNo)}"
 
 proc receiveLoop(blip: Blip) {.async.} =
     ## Async loop that receives WebSocket messages, reads them as BLIP frames, and assembles
@@ -157,7 +199,7 @@ proc receiveLoop(blip: Blip) {.async.} =
         yield f
         if f.failed:
             if f.error.name != "WebSocketClosedError":
-                echo "*** Transport receive error: ", f.error.name, " ", f.error.msg
+                log Error, "Transport receive error: {f.error.name} {f.error.msg}"
             break
         else:
             let frame = f.read

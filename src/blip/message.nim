@@ -1,13 +1,20 @@
 # message.nim
 
-import protocol
-import private/varint, private/crc32
+import protocol, private/[crc32, log, varint]
 import asyncdispatch, endians, strformat, strutils
 
 proc messageType(flags: byte): MessageType =
-    return MessageType(flags and kTypeMask)
+    MessageType(flags and kTypeMask)
+proc isAck(flags: byte): bool =
+    flags.messageType in kAckRequestType .. kAckResponseType
 proc withMessageType(flags: byte, typ: MessageType): byte =
-    return (flags and not kTypeMask) or byte(typ)
+    (flags and not kTypeMask) or byte(typ)
+proc flagsToString*(flags: byte): string =
+    result = "----"
+    if (flags and kMoreComing) != 0: result[0] = '+'
+    if (flags and kNoReply) != 0:    result[1] = 'x'
+    if (flags and kUrgent) != 0:     result[2] = '!'
+    if (flags and kCompressed) != 0: result[3] = 'z'
 
 
 type
@@ -34,14 +41,18 @@ type
     MessageOut* = ref object of Message
         ## [INTERNAL ONLY] An outgoing message in the process of being sent.
         data: seq[byte]         ## Encoded message data (properties size + properties + body)
-        bytesSent: int          ## Number of bytes of data sent so far
+        dataPos: int            ## Position of next byte of `data` to send
+        bytesSent: int          ## Number of bytes sent
+        unackedBytes: int       ## Number of sent bytes that haven't been ACKed
 
     MessageIn* = ref object of Message
         ## An incoming message from the peer, either a request or a response.
         state: MessageInState           ## Tracks what's been received so far
         propertyBuf: seq[byte]          ## Encoded properties
-        propertiesRemaining: int        ## Number of bytes of properties not yet received
         body: seq[byte]                 ## Body
+        rawBytesReceived: int           ## Total number of raw frame bytes received
+        unackedBytes: int               ## Number of bytes received but not ACKed
+        propertiesRemaining: int        ## Number of bytes of properties not yet received
         replyProc: SendProc             ## Function that will send a reply (points to Blip method)
         completionFuture: Future[MessageIn]
 
@@ -51,7 +62,7 @@ type
         ReadingBody
         Complete
 
-    SendProc* = proc(msg: MessageOut): Future[MessageIn]
+    SendProc* = proc(msg: MessageOut): Future[MessageIn] {.gcsafe.}
 
 
 # MessageBuf
@@ -76,7 +87,7 @@ proc `profile=`*(buf: var MessageBuf, profile: string) =
     buf[ProfileProperty] = profile
 
 
-# MessageOut
+# Message
 
 proc priority*(msg: Message): Priority  =
     if (msg.flags and kUrgent) != 0: Urgent else: Normal
@@ -84,6 +95,8 @@ proc noReply*(msg: Message): bool =
     return (msg.flags and kNoReply) != 0
 proc messageType*(msg: Message): MessageType =
     return messageType(msg.flags)
+proc isAck*(msg: Message): bool =
+    return msg.flags.isAck
 proc number*(msg: Message): MessageNo =
     return msg.number
 proc `number=`*(msg: Message, n: MessageNo) =
@@ -94,6 +107,8 @@ proc `number=`*(msg: Message, n: MessageNo) =
 proc `$`*(msg: Message): string =
     $(msg.messageType) & '#' & $uint(msg.number)
 
+# MessageOut
+
 proc newMessageOut*(buf: sink MessageBuf): MessageOut =
     # [INTERNAL ONLY] Creates a new MessageOut from a MessageBuf.
     var flags = byte(buf.messageType)
@@ -103,24 +118,33 @@ proc newMessageOut*(buf: sink MessageBuf): MessageOut =
         flags = flags or kNoReply
     # Encode the message into a byte sequence:
     var data = newSeqOfCap[byte](9 + buf.properties.len + buf.body.len)
-    data.addVarint(uint64(buf.properties.len))
-    data.add(buf.properties)
+    if buf.messageType <= kErrorType:
+        data.addVarint(uint64(buf.properties.len))
+        data.add(buf.properties)
     data.add(cast[seq[byte]](buf.body))
     return MessageOut(flags: flags, number: buf.re, data: data)
 
-proc finished*(msg: MessageOut): bool =
-    msg.bytesSent >= msg.data.len
+proc newACKMessage*(msg: MessageIn, bytesReceived: int): MessageOut =
+    let ackType = if msg.messageType == kRequestType: kAckRequestType else: kAckResponseType
+    var buf = MessageBuf(priority: Urgent, noReply: true, messageType: ackType, re: msg.number)
+    var body = newSeqOfCap[byte](4)
+    body.addVarint(uint64(bytesReceived))
+    buf.body = cast[string](body)
+    return newMessageOut(buf)
 
-proc nextFrame*(msg: MessageOut, maxLen: int, crc32: var CRC32): seq[byte] =
+proc finished*(msg: MessageOut): bool =
+    msg.dataPos >= msg.data.len
+
+proc nextFrame*(msg: MessageOut, maxLen: int, crc32: var CRC32Accumulator): seq[byte] =
     # [INTERNAL ONLY] Returns the next frame to send.
     # After the last frame, the ``kMoreComing`` flag will be cleared.
     var flags = msg.flags
     let metaLen = 1 + sizeOfVarint(uint64(msg.number)) + 4
     assert maxLen > metaLen
-    var payloadLen = min(msg.data.len - msg.bytesSent, maxLen - metaLen)
-    let newBytesSent = msg.bytesSent + payloadLen
-    assert newBytesSent <= len(msg.data)
-    if newBytesSent < msg.data.len:
+    let payloadLen = min(msg.data.len - msg.dataPos, maxLen - metaLen)
+    let newDataPos = msg.dataPos + payloadLen
+    assert newDataPos <= len(msg.data)
+    if newDataPos < msg.data.len:
         flags = flags or kMoreComing
 
     var frame = newSeqOfCap[byte](metaLen + payloadLen)
@@ -128,19 +152,31 @@ proc nextFrame*(msg: MessageOut, maxLen: int, crc32: var CRC32): seq[byte] =
     frame.addVarint(uint64(msg.number))
     assert frame.len == metaLen - 4
 
-    echo &">>> Send frame: {msg} {flagsToString(flags)} {msg.bytesSent}..<{newBytesSent-1}"
+    log Verbose, ">>> Send frame: {msg} {flagsToString(flags)} {msg.dataPos}..<{newDataPos-1}"
 
-    crc32 += msg.data[msg.bytesSent ..< newBytesSent]
-    frame.add(msg.data[msg.bytesSent ..< newBytesSent])
-    msg.bytesSent = newBytesSent
+    frame.add(msg.data[msg.dataPos ..< newDataPos])
+    if msg.messageType <= kErrorType:
+        # Finally add the CRC32 checksum (unless this is an ACK):
+        crc32 += msg.data[msg.dataPos ..< newDataPos]
+        let checksum: uint32 = crc32.result
+        var beChecksum: array[0..3, byte]
+        bigEndian32(addr beChecksum, unsafeAddr checksum)
+        frame.add(beChecksum)
 
-    # Finally add the CRC32 checksum:
-    let checksum = crc32.result
-    var beChecksum: array[0..3, byte]
-    bigEndian32(addr beChecksum, unsafeAddr checksum)
-    frame.add(beChecksum)
+    msg.dataPos = newDataPos
+    msg.bytesSent += frame.len
+    msg.unackedBytes += frame.len
     assert frame.len <= maxLen
     return frame
+
+proc needsAck*(msg: MessageOut): bool =
+    return msg.unackedBytes >= kOutgoingAckThreshold
+
+proc handleAck*(msg: MessageOut, body: openarray[byte]) =
+    let byteCount = getVarint(body)
+    if byteCount <= uint64(msg.bytesSent):
+        msg.unackedBytes = min(msg.unackedBytes, (msg.bytesSent - int(byteCount)))
+    log Verbose, "{msg} received ack to {byteCount}; unackedBytes now {msg.unackedBytes}"
 
 
 proc send*(buf: sink MessageBuf): Future[MessageIn] =
@@ -163,15 +199,16 @@ proc newPendingResponse*(request: MessageOut): MessageIn =
     # [INTERNAL ONLY] Creates a MessageIn for an expected response from the peer.
     assert request.messageType == kRequestType
     assert request.number > MessageNo(0)
-    let flags = withMessageType(request.flags, kResponseType)
+    assert not request.noReply
+    let flags = request.flags.withMessageType(kResponseType)
     return MessageIn(flags: flags, number: request.number, replyProc: nil)
 
 proc readCString(str: var openarray[byte]; pos: var int): string =
-        # No range checking here; we let the runtime throw a range error if props are invalid.
-        var i = pos
-        while str[i] != 0: i += 1
-        result = cast[string](str[pos ..< i])
-        pos = i + 1
+    # No range checking here; we let the runtime throw a range error if props are invalid.
+    var i = pos
+    while str[i] != 0: i += 1
+    result = cast[string](str[pos ..< i])
+    pos = i + 1
 
 iterator properties*(msg: MessageIn): (string, string) =
     assert msg.state > ReadingProperties
@@ -243,21 +280,25 @@ proc replyWithError*(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorM
     ## Sends an error response to this message.
     msg.createErrorResponse(domain, code, errorMessage).sendNoReply()
 
-proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte], crc32: var CRC32) =
+proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte], crc32: var CRC32Accumulator): MessageOut =
     # [INTERNAL ONLY] Assembles the incoming message a frame at a time.
     # Note: `bytes` does not include the frame flags and message number.
+    # Returns an ACK message to be sent to the peer, if one is necessary.
+
+    msg.rawBytesReceived += bytes.len
+    msg.unackedBytes += bytes.len
 
     # First verify the checksum:
     let bytesLen = bytes.len - 4
     assert bytesLen > 0
     crc32 += bytes[0 ..< bytesLen]
-    var checksum: uint32
+    var checksum: CRC32
     bigEndian32(unsafeAddr checksum, unsafeAddr bytes[bytesLen])
     if checksum != crc32.result:
         raise newException(BlipException, "Frame has invalid checksum")
 
     let bytesSoFar = msg.propertyBuf.len + msg.body.len
-    echo &"<<< Rcvd frame: {msg} {flagsToString(flags)} {bytesSoFar}..<{bytesSoFar+bytesLen}"
+    #log Verbose, "<<< Rcvd frame: {msg} {flagsToString(flags)} {bytesSoFar}..<{bytesSoFar+bytesLen}"
 
     var pos = 0;
     if messageType(flags) != msg.messageType:
@@ -286,11 +327,20 @@ proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte], crc32: var C
         msg.body.add(bytes[pos ..< bytesLen])
 
     if (flags and kMoreComing) == 0:
+        # End of message!
         if msg.state < ReadingBody:
             raise newException(BlipException, "Incomplete message properties")
         msg.state = Complete
         if msg.completionFuture != nil:
             msg.completionFuture.complete(msg)
+        return nil
+    elif msg.unackedBytes >= kIncomingAckThreshold:
+        # Tell Blip to send back an ACK:
+        msg.unackedBytes = 0
+        log Verbose, "{msg} Sending ACK of {msg.rawBytesReceived} bytes"
+        return newACKMessage(msg, bytesReceived = msg.rawBytesReceived)
+    else:
+        return nil
 
 proc createCompletionFuture*(msg: MessageIn): Future[MessageIn] =
     if msg.completionFuture == nil:

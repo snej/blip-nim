@@ -1,7 +1,7 @@
 # transport.nim
 
-import protocol
-import asyncdispatch, asyncnet, asynchttpserver, news, strtabs, strutils
+import protocol, private/log
+import asyncdispatch, asyncnet, asynchttpserver, news, strformat, strtabs, strutils
 
 
 type Transport* = ref object of RootObj
@@ -20,7 +20,8 @@ method receive*(t: Transport): Future[seq[byte]] {.base, async.} = discard
 type WebSocketTransport* = ref object of Transport
     ## BLIP Transport implementation using a WebSocket
     socket: WebSocket
-    closing: bool       # workaround for news not implementing WS close handshake
+    sentClose: bool       # workaround for news not implementing WS close handshake
+    receivedClose: bool
 
 proc newWebSocketTransport*(socket: WebSocket): WebSocketTransport =
     ## Wraps a Transport around an existing WebSocket object.
@@ -48,10 +49,10 @@ method disconnect*(t: WebSocketTransport) =
     t.socket.close()
 
 method close*(t: WebSocketTransport) {.async.} =
-    if t.closing:
+    if t.sentClose:
         t.socket.close()
     else:
-        t.closing = true
+        t.sentClose = true
         await t.socket.send("", Opcode.Close)
 
 
@@ -62,7 +63,12 @@ method canReceive*(t: WebSocketTransport): bool =
     return t.socket.readyState == Open
 
 method send*(t: WebSocketTransport; frame: seq[byte]) {.async.} =
-    await t.socket.send(cast[string](frame), Opcode.Binary)
+    let f = t.socket.send(cast[string](frame), Opcode.Binary)
+    yield f
+    if f.failed and f.error.name != "WebSocketClosedError" and t.sentClose and t.receivedClose:
+        log Info, "Transport closed cleanly"
+    else:
+        await f
 
 method receive*(t: WebSocketTransport): Future[seq[byte]] {.async.} =
     while t.socket.readyState == Open:
@@ -71,10 +77,12 @@ method receive*(t: WebSocketTransport): Future[seq[byte]] {.async.} =
             of Binary:
                 return cast[seq[byte]](packet.data)
             of Close:
-                let alreadyClosing = t.closing
-                await t.close()
-                if not alreadyClosing:
+                t.receivedClose = true
+                if t.sentClose:
                     t.socket.close()
+                else:
+                    t.sentClose = true
+                    await t.socket.send("", Opcode.Close)
             else:
-                discard
+                log Warning, "Ignoring WebSocket frame of type {$packet.kind}"
     return @[]

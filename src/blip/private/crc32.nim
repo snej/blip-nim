@@ -1,13 +1,17 @@
 # crc32.nim
-#
-# adapted from github.com/juancarlospaco/nim-crc32, which was "copied from RosettaCode"
+
+## CRC32 digest implementation,
+## adapted from github.com/juancarlospaco/nim-crc32,
+## which was "copied from RosettaCode".
 
 from strutils import toHex
 
 type
-  CRC32* = object
-    ## CRC32 accumulator. Add bytes to it with `+=`, then get its `result`.
-    state: uint32
+  CRC32* = uint32
+
+  CRC32Accumulator* = object
+    ## CRC32 digest generator. Add bytes to it with `+=`, then get its `result`.
+    state: CRC32
 
 
 func createCrcTable(): array[0..255, uint32] {.inline.} =
@@ -21,54 +25,56 @@ func createCrcTable(): array[0..255, uint32] {.inline.} =
 const crc32table = createCrcTable()
 
 
-func reset(crc: var CRC32) {.inline.} =
+func reset*(crc: var CRC32Accumulator) {.inline.} =
+  ## Rests an accumulator back to its initial state.
   crc.state = 0
 
-func `+=`*(crc: var CRC32, b: byte) {.inline.} =
+func `+=`*(crc: var CRC32Accumulator, b: byte) {.inline.} =
   ## Adds a byte to the accumulator.
   crc.state = (crc.state shr 8) xor crc32table[(crc.state and 0xff) xor uint32(b)]
 
-func `+=`*(crc: var CRC32, c: char) {.inline.} =
+func `+=`*(crc: var CRC32Accumulator, c: char) {.inline.} =
   ## Adds a character (byte) to the accumulator.
   crc += byte(ord(c))
 
-func `+=`*(crc: var CRC32, a: openarray[byte]) =
+func `+=`*(crc: var CRC32Accumulator, a: openarray[byte]) =
   ## Adds bytes to the accumulator.
   for b in a:
     crc += b
 
-func `+=`*(crc: var CRC32, s: string) =
+func `+=`*(crc: var CRC32Accumulator, s: string) =
   ## Adds the bytes of the UTF-8 encoded string to the accumulator.
   for c in s:
     crc += c
 
-func result*(crc: CRC32): uint32 {.inline.} =
+func result*(crc: CRC32Accumulator): CRC32 {.inline.} =
   ## The CRC32 checksum of all bytes added to the accumulator so far.
   return not crc.state
 
-proc `$`*(crc: CRC32): string =
+proc `$`*(crc: CRC32Accumulator): string =
+  ## Returns the current digest as an 8-character hex string.
   result = crc.result.int64.toHex(8)
 
 
 # Convenience functions:
 
-func crc32*(s: string): uint32 =
+func crc32*(s: string): CRC32 =
   ## Returns the CRC32 checksum of the bytes of a string.
-  var crc: CRC32
+  var crc: CRC32Accumulator
   crc += s
   return crc.result
 
-func crc32*(a: openarray[byte]): uint32 =
+func crc32*(a: openarray[byte]): CRC32 =
   ## Returns the CRC32 checksum of the bytes.
-  var crc: CRC32
+  var crc: CRC32Accumulator
   crc += a
   return crc.result
 
-proc crc32FromFile*(filename: string): uint32 =
+proc crc32FromFile*(filename: string): CRC32 =
   ## Returns the CRC32 checksum of the contents of a file.
   const bufSize = 8192
   var bin: File
-  var crc: CRC32
+  var crc: CRC32Accumulator
 
   if not open(bin, filename):
     return

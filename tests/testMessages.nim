@@ -1,6 +1,6 @@
 import unittest
 
-import blip/message, blip/protocol, blip/private/crc32
+import blip/message, blip/protocol, blip/private/crc32, blip/private/log
 
 let kFrame1 = @['\x40',  # flags
                 '\x01',  # message#
@@ -18,6 +18,8 @@ let kFrame2 = @['\x00',  # flags
                 '\xD4', 'A', '\xEB', '\xDE'] # checksum
 
 test "Outgoing Message":
+    CurrentLogLevel = Verbose
+
     var buf = newMessage(nil)
     buf["Profile"] = "Insult"
     buf["Language"] = "French"
@@ -45,6 +47,8 @@ test "Outgoing Message":
 
 
 test "Incoming Message":
+    CurrentLogLevel = Verbose
+
     var checksum: CRC32
     let msg = newIncomingRequest(byte(kFrame1[0]), MessageNo(kFrame1[1]), nil)
     msg.addFrame(byte(kFrame1[0]), cast[seq[byte]](kFrame1[2 .. ^1]), checksum)
@@ -61,6 +65,8 @@ test "Incoming Message":
 
 
 test "Frame Sizes":
+    CurrentLogLevel = Warning
+
     var body = ""
     for i in countUp(1, 100):
         body &= "Your mother was a hamster. "
