@@ -27,22 +27,29 @@ proc newWebSocketTransport*(socket: WebSocket): WebSocketTransport =
     ## Wraps a Transport around an existing WebSocket object.
     WebSocketTransport(socket: socket)
 
-proc newWebSocketTransport*(url: string): Future[WebSocketTransport] {.async.} =
+proc protocolName(subprotocol: string): string =
+    result = BLIPWebSocketProtocol
+    if subprotocol.len > 0:
+        result &= "+" & subprotocol
+
+proc newWebSocketTransport*(url: string, subprotocol: string =""): Future[WebSocketTransport] {.async.} =
     ## Creates a Transport by opening a WebSocket client connection.
-    let socket = await newWebSocket("ws://127.0.0.1:9001/_blipsync",
-                                    newStringTable({"Sec-WebSocket-Protocol": BLIPWebSocketProtocol}))
+    let protocol = protocolName(subprotocol)
+    let socket = await newWebSocket(url, newStringTable({"Sec-WebSocket-Protocol": protocol}))
     return newWebSocketTransport(socket)
 
-proc newWebSocketTransport*(request: Request): Future[WebSocketTransport] {.async.} =
+proc newWebSocketTransport*(request: Request, subprotocol: string =""): Future[WebSocketTransport] {.async.} =
     ## Creates a Transport by handling a WebSocket server request.
     var p: string
     if request.headers.hasKey("sec-webSocket-protocol"):
         p = request.headers["sec-webSocket-protocol"].strip()
-    if p != BLIPWebSocketProtocol:
+    log Verbose, "Client Sec-WebSocket-Protocol = '{p}'"
+    if p != protocolName(subprotocol):
         var response = "HTTP/1.1 400 WebSocket subprotocol missing or unknown\c\l\c\l"
         await request.client.send(response)
         return nil
     let socket = await newWebsocket(request)
+    echo "socket.protocol = ", socket.protocol
     return newWebSocketTransport(socket)
 
 method disconnect*(t: WebSocketTransport) =

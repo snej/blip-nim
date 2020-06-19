@@ -22,7 +22,7 @@ type
 
     MessageMap = Table[MessageNo, MessageIn]
 
-    Handler* = proc(msg: MessageIn)
+    Handler* = proc(msg: MessageIn) {.gcsafe.}
 
 proc setBLIPLogLevel*(level: int) =
     ## Sets the level of logging: 0 is errors only, 1 includes warnings, 2 info, 3 verbose, 4 debug
@@ -30,7 +30,10 @@ proc setBLIPLogLevel*(level: int) =
 
 proc newBlip*(socket: Transport): Blip =
     ## Creates a new Blip object from a WebSocket. You still need to call ``run`` on it.
-    Blip(socket: socket)
+    assert socket != nil
+    result = Blip(socket: socket)
+    result.outChecksum.reset()
+    result.inChecksum.reset()
 
 proc addHandler*(blip: Blip, profile: string, handler: Handler) =
     ## Registers a callback that will receive incoming messages with a specific "Profile" property.
@@ -152,11 +155,12 @@ proc handleFrame(blip: Blip, frame: openarray[byte]) =
     if frame.len < 2:
         log Error, "Received impossibly small frame"
         return
-    let flags = frame[0]
-    if (flags and kCompressed) != 0:
-        raise newException(BlipException, "Compressed frames are not supported yet")
-    var pos = 1
+    var pos = 0
     let msgNo = MessageNo(getVarint(frame, pos))
+    if pos >= frame.len:
+        raise newException(BlipException, "Missing flags in frame")
+    let flags = frame[pos]
+    pos += 1
     var msgType = MessageType(flags and kTypeMask)
     let body = frame[pos .. ^1]
     log Verbose, "<<< Rcvd frame: {msgType}#{uint(msgNo)} {flagsToString(flags)} {frame.len-pos} bytes"

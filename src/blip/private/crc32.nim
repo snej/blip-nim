@@ -1,8 +1,7 @@
 # crc32.nim
 
 ## CRC32 digest implementation,
-## adapted from github.com/juancarlospaco/nim-crc32,
-## which was "copied from RosettaCode".
+## based on github.com/juancarlospaco/nim-crc32, which was "copied from RosettaCode".
 
 from strutils import toHex
 
@@ -26,8 +25,8 @@ const crc32table = createCrcTable()
 
 
 func reset*(crc: var CRC32Accumulator) {.inline.} =
-  ## Rests an accumulator back to its initial state.
-  crc.state = 0
+  ## Rests an accumulator back to its initial state (FFFFFFFF).
+  crc.state = not CRC32(0)
 
 func `+=`*(crc: var CRC32Accumulator, b: byte) {.inline.} =
   ## Adds a byte to the accumulator.

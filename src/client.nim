@@ -1,16 +1,40 @@
 import blip, blip/[message, transport]
-import asyncdispatch
+import asyncdispatch, parseopt, strformat, strutils
 
 when isMainModule:
-    const Verbose = true
+    proc fail(msg: string) =
+        echo "Error: ", msg
+        quit(1)
 
-    if Verbose:
-        setBLIPLogLevel(3)
+    var port = 9001
+    var path = "/"
+    var subprotocol = ""
+    var echoMessages = false
+    var logMessages = true
 
-    echo("Connecting to server on port 9001...")
+    for kind, key, val in getopt(shortNoVal = {'v'}, longNoVal = @["verbose", "echo", "log"]):
+        case kind
+        of cmdShortOption:
+            case key
+            of "v":         setBLIPLogLevel(3)
+            else:           fail &"Unknown flag '{key}'"
+        of cmdLongOption:
+            case key
+            of "verbose":   setBLIPLogLevel(3)
+            of "port":      port = val.parseInt()
+            of "path":      path = val
+            of "protocol":  subprotocol = val
+            of "log":       logMessages = true
+            else:           fail &"Unknown flag '{key}'"
+        else:
+            fail("Unsupported parameter '{key}'")
+
+    if path[0] != '/':
+        fail "Path must begin with '/'"
+    echo &"Connecting to server at ws://localhost:{port}{path}"
 
     proc handleResponse(msg: MessageIn) =
-        if Verbose:
+        if logMessages:
             echo "Got a response:"
             for (k, v) in msg.properties:
                 echo "    ", k, " = ", v
@@ -22,7 +46,7 @@ when isMainModule:
     proc Run(blip: Blip) {.async.} =
         var n = 0
         while true:
-            if Verbose or (n mod 1000 == 0):
+            if logMessages or (n mod 1000 == 0):
                 echo "Sending message ", n
             var msg = blip.newRequest("Test")
             msg["Testing"] = "123"
@@ -32,7 +56,7 @@ when isMainModule:
             n += 1
             let f = msg.send()
             f.addCallback(proc (response: Future[MessageIn]) =
-                if Verbose:
+                if logMessages:
                     let body = response.read.body
                     if body.len < 500:
                         echo "Got response with body '", response.read.body, "'"
@@ -43,7 +67,7 @@ when isMainModule:
             break
 
     proc DoIt() {.async.} =
-        var ws = await newWebSocketTransport("ws://127.0.0.1:9001/_blipsync")
+        var ws = await newWebSocketTransport(&"ws://127.0.0.1:{port}{path}", subprotocol)
         echo "Creating new Blip"
         var blip = newBlip(ws)
         await blip.run() and Run(blip)

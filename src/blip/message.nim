@@ -139,7 +139,7 @@ proc nextFrame*(msg: MessageOut, maxLen: int, crc32: var CRC32Accumulator): seq[
     # [INTERNAL ONLY] Returns the next frame to send.
     # After the last frame, the ``kMoreComing`` flag will be cleared.
     var flags = msg.flags
-    let metaLen = 1 + sizeOfVarint(uint64(msg.number)) + 4
+    let metaLen = sizeOfVarint(uint64(msg.number)) + 1 + 4
     assert maxLen > metaLen
     let payloadLen = min(msg.data.len - msg.dataPos, maxLen - metaLen)
     let newDataPos = msg.dataPos + payloadLen
@@ -148,8 +148,8 @@ proc nextFrame*(msg: MessageOut, maxLen: int, crc32: var CRC32Accumulator): seq[
         flags = flags or kMoreComing
 
     var frame = newSeqOfCap[byte](metaLen + payloadLen)
-    frame.add(flags)
     frame.addVarint(uint64(msg.number))
+    frame.add(flags)
     assert frame.len == metaLen - 4
 
     log Verbose, ">>> Send frame: {msg} {flagsToString(flags)} {msg.dataPos}..<{newDataPos-1}"
@@ -285,6 +285,9 @@ proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte], crc32: var C
     # Note: `bytes` does not include the frame flags and message number.
     # Returns an ACK message to be sent to the peer, if one is necessary.
 
+    if (flags and kCompressed) != 0:
+        raise newException(BlipException, "Compressed frames are not supported yet")
+
     msg.rawBytesReceived += bytes.len
     msg.unackedBytes += bytes.len
 
@@ -295,7 +298,7 @@ proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte], crc32: var C
     var checksum: CRC32
     bigEndian32(unsafeAddr checksum, unsafeAddr bytes[bytesLen])
     if checksum != crc32.result:
-        raise newException(BlipException, "Frame has invalid checksum")
+        raise newException(BlipException, &"Frame has invalid checksum {checksum:x}: should be {crc32.result:x}")
 
     let bytesSoFar = msg.propertyBuf.len + msg.body.len
     #log Verbose, "<<< Rcvd frame: {msg} {flagsToString(flags)} {bytesSoFar}..<{bytesSoFar+bytesLen}"
