@@ -26,6 +26,8 @@ type
     ## CRC32 digest generator. Add bytes to it with `+=`, then get its `result`.
     state: CRC32
 
+const CRC32Size* = 4
+
 
 func createCrcTable(): array[0..255, uint32] {.inline.} =
   for i in 0..255:

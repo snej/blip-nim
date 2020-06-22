@@ -18,8 +18,8 @@ import unittest
 
 import blip/message, blip/protocol, blip/private/crc32, blip/private/log
 
-let kFrame1 = @['\x40',  # flags
-                '\x01',  # message#
+let kFrame1 = @['\x01',  # message#
+                '\x40',  # flags
                 '\x1F',  # properties length
                 'P', 'r', 'o', 'f', 'i', 'l', 'e', '\x00',
                 'I', 'n', 's', 'u', 'l', 't', '\x00',
@@ -27,8 +27,8 @@ let kFrame1 = @['\x40',  # flags
                 'F', 'r', 'e', 'n', 'c', 'h', '\x00',
                 'Y', 'o', 'u', 'r', ' ', 'm',
                 '\x1A', '?', 'w', '\xBF'] # checksum
-let kFrame2 = @['\x00',  # flags
-                '\x01',  # message#
+let kFrame2 = @['\x01',  # message#
+                '\x00',  # flags
                 'o', 't', 'h', 'e', 'r', ' ', 'w', 'a', 's', ' ',
                 'a', ' ', 'h', 'a', 'm', 's', 't', 'e', 'r',
                 '\xD4', 'A', '\xEB', '\xDE'] # checksum
@@ -49,7 +49,7 @@ test "Outgoing Message":
     check msg.messageType == kRequestType
     check not msg.finished
 
-    var checksum: CRC32
+    var checksum: CRC32Accumulator
     var frame = msg.nextFrame(44, checksum)
     check frame.len == 44
     echo cast[seq[char]](frame)
@@ -65,11 +65,11 @@ test "Outgoing Message":
 test "Incoming Message":
     CurrentLogLevel = Verbose
 
-    var checksum: CRC32
-    let msg = newIncomingRequest(byte(kFrame1[0]), MessageNo(kFrame1[1]), nil)
-    msg.addFrame(byte(kFrame1[0]), cast[seq[byte]](kFrame1[2 .. ^1]), checksum)
+    var checksum: CRC32Accumulator
+    let msg = newIncomingRequest(byte(kFrame1[1]), MessageNo(kFrame1[0]), nil)
+    discard msg.addFrame(byte(kFrame1[1]), cast[seq[byte]](kFrame1[2 .. ^1]), checksum)
     check not msg.finished
-    msg.addFrame(byte(kFrame2[0]), cast[seq[byte]](kFrame2[2 .. ^1]), checksum)
+    discard msg.addFrame(byte(kFrame2[1]), cast[seq[byte]](kFrame2[2 .. ^1]), checksum)
     check msg.finished
 
     check msg.body == "Your mother was a hamster"
@@ -94,16 +94,16 @@ test "Frame Sizes":
 
     for frameSize in 8..len(buf.body)+100:
         #echo frameSize, " byte frames"
-        var outSum: CRC32
-        var inSum: CRC32
+        var outSum: CRC32Accumulator
+        var inSum: CRC32Accumulator
         var msgOut = newMessageOut(buf)
         msgOut.number = MessageNo(1)
         var msgIn: MessageIn = nil
         while not msgOut.finished:
             var frame = msgOut.nextFrame(frameSize, outSum)
             if msgIn == nil:
-                msgIn = newIncomingRequest(byte(frame[0]), MessageNo(frame[1]), nil)
-            msgIn.addFrame(byte(frame[0]), cast[seq[byte]](frame[2 .. ^1]), inSum)
+                msgIn = newIncomingRequest(byte(frame[1]), MessageNo(frame[0]), nil)
+            discard msgIn.addFrame(byte(frame[1]), cast[seq[byte]](frame[2 .. ^1]), inSum)
         check msgIn.finished
 
         check msgIn.body == body
