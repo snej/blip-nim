@@ -16,7 +16,7 @@
 
 import unittest
 
-import blip/message, blip/protocol, blip/private/crc32, blip/private/log
+import blip/message, blip/protocol, blip/private/[codec, log, subseq]
 
 let kFrame1 = @['\x01',  # message#
                 '\x40',  # flags
@@ -26,12 +26,12 @@ let kFrame1 = @['\x01',  # message#
                 'L', 'a', 'n', 'g', 'u', 'a', 'g', 'e', '\x00',
                 'F', 'r', 'e', 'n', 'c', 'h', '\x00',
                 'Y', 'o', 'u', 'r', ' ', 'm',
-                '\x1A', '?', 'w', '\xBF'] # checksum
+                '}', '9', '\x13', '\xF3'] # checksum
 let kFrame2 = @['\x01',  # message#
                 '\x00',  # flags
                 'o', 't', 'h', 'e', 'r', ' ', 'w', 'a', 's', ' ',
                 'a', ' ', 'h', 'a', 'm', 's', 't', 'e', 'r',
-                '\xD4', 'A', '\xEB', '\xDE'] # checksum
+                '\xF6', 'o', '\xCA', '='] # checksum
 
 test "Outgoing Message":
     CurrentLogLevel = Verbose
@@ -49,27 +49,35 @@ test "Outgoing Message":
     check msg.messageType == kRequestType
     check not msg.finished
 
-    var checksum: CRC32Accumulator
-    var frame = msg.nextFrame(44, checksum)
+    var codec = newDeflater()
+    var frame = newSubseqOfCap[byte](44)
+    msg.nextFrame(frame, codec)
     check frame.len == 44
-    echo cast[seq[char]](frame)
-    check cast[seq[char]](frame) == kFrame1
+    var chars = cast[seq[char]](frame.toSeq)
+    echo chars
+    check chars == kFrame1
     check not msg.finished
 
-    frame = msg.nextFrame(44, checksum)
-    echo cast[seq[char]](frame)
-    check cast[seq[char]](frame) == kFrame2
+    msg.nextFrame(frame, codec)
+    chars = cast[seq[char]](frame.toSeq)
+    echo chars
+    check chars == kFrame2
     check msg.finished
 
 
 test "Incoming Message":
-    CurrentLogLevel = Verbose
+    #CurrentLogLevel = Debug
 
-    var checksum: CRC32Accumulator
+    let buffer = newSubseqOfCap[byte](1000)
+    var codec = newInflater()
     let msg = newIncomingRequest(byte(kFrame1[1]), MessageNo(kFrame1[0]), nil)
-    discard msg.addFrame(byte(kFrame1[1]), cast[seq[byte]](kFrame1[2 .. ^1]), checksum)
+    var frame = cast[seq[byte]](kFrame1).toSubseq()
+    frame.moveStart(2)
+    discard msg.addFrame(byte(kFrame1[1]), frame, buffer, codec)
     check not msg.finished
-    discard msg.addFrame(byte(kFrame2[1]), cast[seq[byte]](kFrame2[2 .. ^1]), checksum)
+    frame = cast[seq[byte]](kFrame2).toSubseq()
+    frame.moveStart(2)
+    discard msg.addFrame(byte(kFrame2[1]), frame, buffer, codec)
     check msg.finished
 
     check msg.body == "Your mother was a hamster"
@@ -81,7 +89,7 @@ test "Incoming Message":
 
 
 test "Frame Sizes":
-    CurrentLogLevel = Warning
+    #CurrentLogLevel = Debug
 
     var body = ""
     for i in countUp(1, 100):
@@ -92,26 +100,30 @@ test "Frame Sizes":
     buf["Language"] = "French"
     buf.body = body
 
-    for frameSize in 8..len(buf.body)+100:
+    let buffer = newSubseqOfCap[byte](1000)
+
+    #for frameSize in 8..len(buf.body)+100:
+    for frameSize in 100..100:
         #echo frameSize, " byte frames"
-        var outSum: CRC32Accumulator
-        var inSum: CRC32Accumulator
+        var outCodec = newDeflater()
+        var inCodec = newInflater()
+        var frame = newSubseqOfCap[byte](frameSize)
         var msgOut = newMessageOut(buf)
         msgOut.number = MessageNo(1)
         var msgIn: MessageIn = nil
         while not msgOut.finished:
-            var frame = msgOut.nextFrame(frameSize, outSum)
+            msgOut.nextFrame(frame, outCodec)
             if msgIn == nil:
                 msgIn = newIncomingRequest(byte(frame[1]), MessageNo(frame[0]), nil)
-            discard msgIn.addFrame(byte(frame[1]), cast[seq[byte]](frame[2 .. ^1]), inSum)
+            discard msgIn.addFrame(byte(frame[1]), frame[2 .. ^1], buffer, inCodec)
         check msgIn.finished
 
-        check msgIn.body == body
         check msgIn["Profile"] == "Insult"
         check msgIn["Language"] == "French"
         check msgIn["Horse"] == ""
         check msgIn.property("Horse", "coconuts") == "coconuts"
         check msgIn.intProperty("Language", -1) == -1
+        check msgIn.body == body
 
         var props: string
         for (k, v) in msgIn.properties:

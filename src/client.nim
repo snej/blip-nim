@@ -34,7 +34,7 @@ when isMainModule:
         case kind
         of cmdShortOption:
             case key
-            of "v":         setBLIPLogLevel(3)
+            of "v":         setBLIPLogLevel(4)
             else:           fail &"Unknown flag '{key}'"
         of cmdLongOption:
             case key

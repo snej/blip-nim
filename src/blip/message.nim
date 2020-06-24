@@ -16,8 +16,8 @@
 
 ## BLIP message implementation.
 
-import protocol, private/[crc32, log, varint]
-import asyncdispatch, endians, strformat, strutils
+import protocol, private/[codec, log, subseq, varint]
+import asyncdispatch, strformat, strutils
 
 proc messageType(flags: byte): MessageType =
     MessageType(flags and kTypeMask)
@@ -56,8 +56,7 @@ type
 
     MessageOut* = ref object of Message
         ## [INTERNAL ONLY] An outgoing message in the process of being sent.
-        data: seq[byte]         ## Encoded message data (properties size + properties + body)
-        dataPos: int            ## Position of next byte of `data` to send
+        data: subseq[byte]      ## Encoded message data (properties size + properties + body)
         bytesSent: int          ## Number of bytes sent
         unackedBytes: int       ## Number of sent bytes that haven't been ACKed
 
@@ -133,7 +132,7 @@ proc newMessageOut*(buf: sink MessageBuf): MessageOut =
     if buf.noReply:
         flags = flags or kNoReply
     # Encode the message into a byte sequence:
-    var data = newSeqOfCap[byte](9 + buf.properties.len + buf.body.len)
+    var data = newSubseqOfCap[byte](9 + buf.properties.len + buf.body.len)
     if buf.messageType <= kErrorType:
         data.addVarint(uint64(buf.properties.len))
         data.add(buf.properties)
@@ -149,41 +148,31 @@ proc newACKMessage*(msg: MessageIn, bytesReceived: int): MessageOut =
     return newMessageOut(buf)
 
 proc finished*(msg: MessageOut): bool =
-    msg.dataPos >= msg.data.len
+    msg.data.len == 0
 
-proc nextFrame*(msg: MessageOut, maxLen: int, crc32: var CRC32Accumulator): seq[byte] =
-    # [INTERNAL ONLY] Returns the next frame to send.
-    # After the last frame, the ``kMoreComing`` flag will be cleared.
-    var flags = msg.flags
-    let metaLen = sizeOfVarint(uint64(msg.number)) + 1 + 4
-    assert maxLen > metaLen
-    let payloadLen = min(msg.data.len - msg.dataPos, maxLen - metaLen)
-    let newDataPos = msg.dataPos + payloadLen
-    assert newDataPos <= len(msg.data)
-    if newDataPos < msg.data.len:
-        flags = flags or kMoreComing
-
-    var frame = newSeqOfCap[byte](metaLen + payloadLen)
+proc nextFrame*(msg: MessageOut, frame: var subseq[byte], codec: Codec) =
+    # [INTERNAL ONLY] Fills `frame` with the next frame to send.
+    frame.clear()
     frame.addVarint(uint64(msg.number))
+    let flagsPos = frame.len
+    var flags = msg.flags
     frame.add(flags)
-    assert frame.len == metaLen - 4
 
-    log Verbose, ">>> Send frame: {msg} {flagsToString(flags)} {msg.dataPos}..<{newDataPos-1}"
+    if msg.messageType >= kAckRequestType:
+        frame.add(msg.data.toOpenArray)
+        msg.data.reset()
+        return
 
-    frame.add(msg.data[msg.dataPos ..< newDataPos])
-    if msg.messageType <= kErrorType:
-        # Finally add the CRC32 checksum (unless this is an ACK):
-        crc32 += msg.data[msg.dataPos ..< newDataPos]
-        let checksum: uint32 = crc32.result
-        var beChecksum: array[0..3, byte]
-        bigEndian32(addr beChecksum, unsafeAddr checksum)
-        frame.add(beChecksum)
+    codec.write(msg.data, frame, Raw)
 
-    msg.dataPos = newDataPos
-    msg.bytesSent += frame.len
-    msg.unackedBytes += frame.len
-    assert frame.len <= maxLen
-    return frame
+    if msg.data.len > 0:
+        flags = flags or kMoreComing
+        frame[flagsPos] = flags
+
+    let bytesSent = frame.len - flagsPos - 1  # don't count metadata
+    log Verbose, ">>> Send frame: {msg} {flagsToString(flags)} {bytesSent} bytes at {msg.bytesSent}"
+    msg.bytesSent += bytesSent
+    msg.unackedBytes += bytesSent
 
 proc needsAck*(msg: MessageOut): bool =
     return msg.unackedBytes >= kOutgoingAckThreshold
@@ -296,30 +285,21 @@ proc replyWithError*(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorM
     ## Sends an error response to this message.
     msg.createErrorResponse(domain, code, errorMessage).sendNoReply()
 
-proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte], crc32: var CRC32Accumulator): MessageOut =
+proc addFrame*(msg: MessageIn;
+               flags: byte;
+               frame: subseq[byte];
+               buffer: subseq[byte];
+               codec: Codec): MessageOut =
     # [INTERNAL ONLY] Assembles the incoming message a frame at a time.
-    # Note: `bytes` does not include the frame flags and message number.
+    # Note: `frame` does not include the frame flags and message number.
     # Returns an ACK message to be sent to the peer, if one is necessary.
 
     if (flags and kCompressed) != 0:
         raise newException(BlipException, "Compressed frames are not supported yet")
 
-    msg.rawBytesReceived += bytes.len
-    msg.unackedBytes += bytes.len
+    msg.rawBytesReceived += frame.len
+    msg.unackedBytes += frame.len
 
-    # First verify the checksum:
-    let bytesLen = bytes.len - 4
-    assert bytesLen > 0
-    crc32 += bytes[0 ..< bytesLen]
-    var checksum: CRC32
-    bigEndian32(unsafeAddr checksum, unsafeAddr bytes[bytesLen])
-    if checksum != crc32.result:
-        raise newException(BlipException, &"Frame has invalid checksum {checksum:x}: should be {crc32.result:x}")
-
-    let bytesSoFar = msg.propertyBuf.len + msg.body.len
-    #log Verbose, "<<< Rcvd frame: {msg} {flagsToString(flags)} {bytesSoFar}..<{bytesSoFar+bytesLen}"
-
-    var pos = 0;
     if messageType(flags) != msg.messageType:
         if messageType(flags) == kErrorType:
             # If an error frame arrives, reset state to read the error
@@ -329,21 +309,29 @@ proc addFrame*(msg: MessageIn; flags: byte; bytes: openarray[byte], crc32: var C
             msg.body = @[]
         else:
             raise newException(BlipException, "Frame has inconsistent message type")
-    if msg.state == Start:
-        # First frame. This one starts with the properties length, and (some or all) properties.
-        msg.propertiesRemaining = int(getVarint(bytes, pos))
-        msg.propertyBuf = newSeqOfCap[byte](min(msg.propertiesRemaining, 4096))
-        msg.state = ReadingProperties
-    if msg.state == ReadingProperties:
-        # There are still bytes of properties left to read:
-        let newPos = min(pos + msg.propertiesRemaining, bytesLen)
-        msg.propertyBuf.add(bytes[pos ..< newPos])
-        msg.propertiesRemaining -= (newPos - pos)
-        pos = newPos
-        if msg.propertiesRemaining == 0:
-            msg.state = ReadingBody
-    if msg.state == ReadingBody:
-        msg.body.add(bytes[pos ..< bytesLen])
+
+    var inputRemaining = frame
+    while inputRemaining.len > 0:
+        log Verbose, "    processing {inputRemaining.len} bytes..."
+        var decoded = buffer
+        codec.write(inputRemaining, decoded, Raw)
+        var pos = 0;
+
+        if msg.state == Start:
+            # First frame. This one starts with the properties length, and (some or all) properties.
+            msg.propertiesRemaining = int(getVarint(decoded.toOpenArray, pos))
+            msg.propertyBuf = newSeqOfCap[byte](min(msg.propertiesRemaining, 4096))
+            msg.state = ReadingProperties
+        if msg.state == ReadingProperties:
+            # There are still bytes of properties left to read:
+            let newPos = min(pos + msg.propertiesRemaining, decoded.len)
+            msg.propertyBuf.add(decoded[pos ..< newPos].toOpenArray)
+            msg.propertiesRemaining -= (newPos - pos)
+            pos = newPos
+            if msg.propertiesRemaining == 0:
+                msg.state = ReadingBody
+        if msg.state == ReadingBody:
+            msg.body.add(decoded[pos .. ^1].toOpenArray)
 
     if (flags and kMoreComing) == 0:
         # End of message!

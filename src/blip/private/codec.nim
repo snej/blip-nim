@@ -17,7 +17,7 @@
 ## Compression/decompression via the Deflate algorithm.
 ## (This code was ported from Codec.{cc,hh} in LiteCore.)
 
-import crc32, log
+import crc32, log, subseq
 import endians, strformat, zip/zlib
 
 
@@ -39,19 +39,18 @@ type
 
     CodecException* = object of CatchableError
 
-const DefaultMode = Mode.SyncFlush
+const DefaultMode* = Mode.SyncFlush
 
 proc initCodec(c: Codec) =
     c.checksum.reset()
 
 method write*(c: Codec;
-              input: openarray[byte]; inRange: var Slice[int];
-              output: var openarray[byte]; outRange: var Slice[int];
+              input: var subseq[byte];
+              output: var subseq[byte];
               mode: Mode = DefaultMode) {.base.} =
     ## Processes bytes through the codec; could be deflate, inflate or passthrough.
-    ## As many bytes as possible are read starting from ``input[inputPos]``;
-    ## then ``inputPos`` is updated to the index of the first unread byte.
-    ## Output is appended to ``output``.
+    ## As many bytes as possible are read transferred, then ``input``'s start is moved forward
+    ## to the first unread byte, and ``output`` is shortened to fit the bytes written to it.
     discard
 
 method unflushedBytes*(c: Codec): int {.base.} =
@@ -59,44 +58,35 @@ method unflushedBytes*(c: Codec): int {.base.} =
     ## of space.
     return 0
 
-proc writeChecksum*(c: Codec;
-                    output: var openarray[byte]; outRange: var Slice[int]) =
+proc writeChecksum*(c: Codec; output: var subseq[byte]) =
     ## Writes the codec's current checksum to the output slice.
     ## This is a big-endian CRC32 checksum of all the unencoded data processed so far.
+    let pos = output.len
+    output.grow(CRC32Size)
     let checksum = c.checksum.result
-    bigEndian32(addr output[outRange.a], unsafeAddr checksum)
-    outRange.a += CRC32Size
+    bigEndian32(addr output[pos], unsafeAddr checksum)
+    log Debug, "    wrote checksum {checksum:8x}"
 
-proc readAndVerifyChecksum*(c: Codec;
-                            input: openarray[byte]; inRange: var Slice[int]) =
+proc readAndVerifyChecksum*(c: Codec; input: var subseq[byte]) =
     ## Reads a checksum from the input slice and compares it with the codec's current one.
     ## If they aren't equal, throws an exception.
-    if inRange.len < CRC32Size:
+    if input.len < CRC32Size:
         raise newException(CodecException, &"Missing checksum")
     var inputChecksum: CRC32
-    bigEndian32(unsafeAddr inputChecksum, unsafeAddr input[inRange.a])
-    inRange.a += CRC32Size
+    bigEndian32(unsafeAddr inputChecksum, addr input[0])
+    log Debug, "    read checksum {inputChecksum:8x}, expecting {c.checksum.result:8x}"
     if inputChecksum != c.checksum.result:
         raise newException(CodecException, &"Invalid checksum {inputChecksum:x}: should be {c.checksum.result:x}")
+    input.moveStart(CRC32Size)
 
-proc copyBytes(dst: var openarray[byte]; dstPos: int;
-               src: openarray[byte]; srcPos: int;
-               n: int) =
-    ## Range-checked copy between byte arrays
-    rangeCheck(dstPos >= 0 and dstPos + n <= len(dst) and n >= 0)
-    rangeCheck(srcPos >= 0 and srcPos + n <= len(src))
-    copyMem(unsafeAddr dst[dstPos], unsafeAddr src[srcPos], n)
-
-proc writeRaw(c: Codec;
-              input: openarray[byte]; inRange: var Slice[int];
-              output: var openarray[byte]; outRange: var Slice[int]) =
+proc writeRaw(c: Codec; input: var subseq[byte]; output: var subseq[byte], maxBytes: int) =
     ## Uncompressed write
-    log Debug, "Copying {inRange.len} bytes into {outRange.len}-byte buf (no compression)"
-    let n = min(inRange.len, outRange.len)
-    c.checksum += input[inRange.a ..< inRange.a + n]
-    copyBytes(output, outRange.a, input, inRange.a, n)
-    inRange.a += n
-    outRange.a += n
+    let n = min(min(input.len, output.spare), maxBytes)
+    log Debug, "    Copying {n} bytes from {input.len}-byte input to {output.spare}-byte output (no compression)"
+    let pos = output.len
+    output.grow(n)
+    copyMem(unsafeAddr output[pos], unsafeAddr input[0], n)
+    input.moveStart(n)
 
 
 # Zlib Codec:
@@ -127,30 +117,37 @@ proc check(c: ZlibCodec; ret: int) =
     if ret < 0 and ret != Z_BUF_ERROR:
         raise newException(CodecException, &"Zlib error {ret}: {c.z.msg}")
 
+proc indexOfPtr(s: subseq[byte]; p: pointer): int =
+    result = cast[int](p)  - cast[int](unsafeAddr s[0])
+    rangeCheck result in 0 .. s.len
+
 proc zwrite(c: ZlibCodec;
             operation: cstring,
-            input: openarray[byte];
-            inRange: var Slice[int];
-            output: var openarray[byte];
-            outRange: var Slice[int];
+            input: var subseq[byte];
+            output: var subseq[byte];
             mode: Mode;
             maxInput: int) =
     ## Low-level wrapper around `deflate` / `inflate`. Mostly just translates between the Nim
     ## openarray-and-Slice representation and the C void*-and-int representation.
     assert mode > Mode.Raw
-    let inSize = min(inRange.len, maxInput)
+    let inSize = min(input.len, maxInput)
     c.z.availIn = Uint(inSize)
-    c.z.nextIn = cast[Pbytef](unsafeAddr input[inRange.a])
-    let outSize = outRange.len
-    assert outSize > 0
-    c.z.availOut = Uint(outSize)
-    c.z.nextOut = cast[Pbytef](unsafeAddr output[outRange.a])
+    c.z.nextIn = cast[Pbytef](unsafeAddr input[0])
+
+    let outSpare = output.spare
+    assert outSpare > 0
+    c.z.availOut = Uint(outSpare)
+    let outLen = output.len
+    output.resize(output.cap)
+    c.z.nextOut = cast[Pbytef](unsafeAddr output[outLen])
     let err = c.flateProc(c.z, int32(mode))
-    log Debug, "    {operation}(in[{inRange.a}..{inRange.a+inSize-1}, out[{outRange.a}..{outRange.b}], mode {mode})-> {err}"
-    c.check(err)
-    inRange.a  = cast[int](c.z.nextIn)  - cast[int](unsafeAddr input[0])
-    outRange.a = cast[int](c.z.nextOut) - cast[int](unsafeAddr output[0])
-    log Debug, "        now inRange starts {inRange.a}, outRange starts {outRange.a}"
+    if err != 0:
+        log Debug, "    {operation}(in[0..{inSize-1}], out[0..{outSpare-1}], mode {mode})-> err {err}"
+        output.resize(outLen)
+        c.check(err)
+    input.moveStart(input.indexOfPtr(c.z.nextIn))
+    output.resize(output.indexOfPtr(c.z.nextOut))
+    log Debug, "    {operation}(in[0..{inSize-1}], out[0..{outSpare-1}], mode {mode})-> {output.len - outLen} bytes"
 
 
 # Deflater:
@@ -167,44 +164,58 @@ proc newDeflater*(level: CompressionLevel = DefaultCompression): Deflater =
                  "1.2.11", sizeof(ZStream).cint))
 
 proc writeAndFlush(c: Deflater;
-              input: openarray[byte]; inRange: var Slice[int];
-              output: var openarray[byte]; outRange: var Slice[int]) =
+              input: var subseq[byte];
+              output: var subseq[byte]) =
     const HeadroomForFlush = 12
     const StopAtOutputSize = 100
 
     var curMode = PartialFlush
-    while inRange.len > 0:
-        if Ulong(outRange.len) >= deflateBound(c.z, Ulong(inRange.len)):
+    while input.len > 0:
+        if Ulong(output.spare) >= deflateBound(c.z, Ulong(input.len)):
             # Entire input is guaranteed to fit, so write it & flush:
             curMode = SyncFlush
-            c.zwrite("deflate", input, inRange, output, outRange, SyncFlush, inRange.len)
+            c.zwrite("deflate", input, output, SyncFlush, input.len)
         else:
             # Limit input size to what we know can be compressed into output.
             # Don't flush, because we may try to write again if there's still room.
-            c.zwrite("deflate", input, inRange, output, outRange, curMode,
-                     outRange.len - HeadroomForFlush)
-        if outRange.len <= StopAtOutputSize:
+            c.zwrite("deflate", input, output, curMode, output.spare - HeadroomForFlush)
+        if output.spare <= StopAtOutputSize:
             break;
     if curMode != SyncFlush:
         # Flush if we haven't yet (consuming no input)
-        c.zwrite("deflate", input, inRange, output, outRange, SyncFlush, 0)
+        c.zwrite("deflate", input, output, SyncFlush, 0)
 
 method write*(c: Deflater;
-              input: openarray[byte]; inRange: var Slice[int];
-              output: var openarray[byte]; outRange: var Slice[int];
+              input: var subseq[byte];
+              output: var subseq[byte];
               mode: Mode) =
-    if mode == Mode.Raw:
-        c.writeRaw(input, inRange, output, outRange)
-    else:
-        let origInRange = inRange
-        let origOutRange = outRange
-        log Debug, "Compressing {inRange.len} bytes into {outRange.len}-byte buf"
-        case mode
-            of NoFlush:   c.zwrite("deflate", input, inRange, output, outRange, mode, inRange.len)
-            of SyncFlush: c.writeAndFlush(input, inRange, output, outRange)
-            else:         raise newException(CodecException, &"Invalid mode")
-        c.checksum += input[origInRange.a ..< inRange.a]
-        log Debug, "    compressed {origInRange.len - inRange.len} bytes to {origOutRange.len - outRange.len}, {c.unflushedBytes} unflushed"
+    let origInput = input
+    var origOutput = output
+    log Debug, "Compressing {input.len} bytes into {output.spare}-byte buf"
+    # Compress the input to the output:
+    case mode
+        of Raw:       c.writeRaw(input, output, output.spare - CRC32Size)
+        of NoFlush:   c.zwrite("deflate", input, output, mode, input.len)
+        of SyncFlush: c.writeAndFlush(input, output)
+        else:         raise newException(CodecException, &"Invalid mode")
+
+    # Compute and write the checksum:
+    let inputConsumed = origInput.len - input.len
+    c.checksum += origInput[0 ..< inputConsumed].toOpenArray
+    if mode == Raw:
+        # In raw mode the checksum is just appended:
+        c.writeChecksum(output)
+
+    let outputWritten = output.len - origOutput.len
+
+    if mode != Raw:
+        # When deflating, the last 4 bytes of the output are always 0000FFFF; as a space saving
+        # measure, overwrite them with the checksum. (The Inflater will restore them.)
+        let trailer = output[^CRC32Size .. ^1]
+        assert trailer[0] == 0 and trailer[1] == 0 and trailer[2] == 0xFF and trailer[3] == 0xFF
+        output.resize(output.len - CRC32Size)
+        c.writeChecksum(output)
+    log Debug, "    compressed {inputConsumed} bytes to {outputWritten} ({c.unflushedBytes} unflushed)"
 
 method unflushedBytes*(c: Deflater): int =
     var bytes: cuint
@@ -226,15 +237,30 @@ proc newInflater*(): Inflater =
     result.flateProc = zlib.inflate
     result.check(inflateInit2(result.z, -ZlibWindowSize))
 
+let kTrailer = @[0x00'u8, 0x00, 0xFF, 0xFF].toSubseq
+
 method write*(c: Inflater;
-              input: openarray[byte]; inRange: var Slice[int];
-              output: var openarray[byte]; outRange: var Slice[int];
+              input: var subseq[byte];
+              output: var subseq[byte];
               mode: Mode) =
+    log Debug, "Decompressing {input.len} bytes into {output.spare}-byte buf"
+    var origOutput = output
     if mode == Mode.Raw:
-        c.writeRaw(input, inRange, output, outRange)
+        # Raw 'decompress'. Just copy input bytes, except for the trailing checksum:
+        c.writeRaw(input, output, input.len - CRC32Size)
     else:
-        log Debug, "Decompressing {inRange.len} bytes into {outRange.len}-byte buf"
-        let outStart = outRange.a
-        c.zwrite("inflate", input, inRange, output, outRange, mode, inRange.len)
-        c.checksum += output[outStart ..< outRange.a]
-        log Debug, "    decompressed to {outRange.a - outStart} bytes"
+        # Inflate the input. The checksum was written over the expected 0000FFFF trailer,
+        # so handle the last 4 bytes separately:
+        if input.len > CRC32Size:
+            c.zwrite("inflate", input, output, mode, input.len - CRC32Size)
+        if input.len <= CRC32Size:
+            var trailer = kTrailer
+            c.zwrite("inflate", trailer, output, mode, trailer.len)
+            assert trailer.len == 0
+        log Debug, "    decompressed to {output.len - output.len} bytes"
+
+    let bytesWritten = output.len - origOutput.len
+    output.resize(bytesWritten)
+    c.checksum += output[origOutput.len ..< output.len]
+    if input.len <= CRC32Size:
+        c.readAndVerifyChecksum(input)

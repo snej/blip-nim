@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import blip/[message, outbox, protocol, transport]
-import blip/private/[crc32, log, varint]
+import blip/private/[codec, log, subseq, varint]
 import asyncdispatch, strformat, tables
 
 
@@ -28,8 +28,10 @@ type
         inNumber: MessageNo             # Number of latest incoming message
         incomingRequests: MessageMap    # Incoming partial request messages
         incomingResponses: MessageMap   # Incoming partial response messages
-        outChecksum: CRC32Accumulator
-        inChecksum: CRC32Accumulator
+        outBuffer: subseq[byte]         # Reuseable buffer for outgoing frames
+        inBuffer: subseq[byte]          # Reuseable buffer for incoming frames
+        outCodec: Deflater
+        inCodec: Inflater
         defaultHandler: Handler         # Default callback to handle incoming requests
         handlers: Table[string, Handler]# Callbacks for requests with specific "Profile"s
 
@@ -45,8 +47,10 @@ proc newBlip*(socket: Transport): Blip =
     ## Creates a new Blip object from a WebSocket. You still need to call ``run`` on it.
     assert socket != nil
     result = Blip(socket: socket)
-    result.outChecksum.reset()
-    result.inChecksum.reset()
+    result.outCodec = newDeflater()
+    result.inCodec = newInflater()
+    result.outBuffer = newSubseq[byte](32768)
+    result.inBuffer = newSubseqOfCap[byte](32768)
 
 proc addHandler*(blip: Blip, profile: string, handler: Handler) =
     ## Registers a callback that will receive incoming messages with a specific "Profile" property.
@@ -100,7 +104,9 @@ proc sendLoop(blip: Blip) {.async.} =
         if msg == nil:
             return
         let frameSize = if (msg.priority == Urgent or blip.outbox.empty): 32768 else: 4096
-        let frame = msg.nextFrame(frameSize, blip.outChecksum)
+        var buffer = blip.outBuffer[0 ..< frameSize]
+        buffer.clear()
+        msg.nextFrame(buffer, blip.outCodec)
         if not msg.finished:
             if msg.needsAck:
                 log Info, "Freezing {msg} until acked"
@@ -108,7 +114,7 @@ proc sendLoop(blip: Blip) {.async.} =
             else:
                 blip.outbox.push(msg)
 
-        let f = blip.socket.send(frame)
+        let f = blip.socket.send(buffer.toSeq)
         yield f
         if f.failed:
             if f.error.name != "WebSocketClosedError":
@@ -163,20 +169,19 @@ proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
     else:
         log Warning, "No handler for incoming noreply request, profile='{profile}'"
 
-proc handleFrame(blip: Blip, frame: openarray[byte]) =
+proc handleFrame(blip: Blip, frame: var subseq[byte]) =
     # Read the flags and message number:
     if frame.len < 2:
         log Error, "Received impossibly small frame"
         return
     var pos = 0
-    let msgNo = MessageNo(getVarint(frame, pos))
+    let msgNo = MessageNo(getVarint(frame.toOpenArray, pos))
     if pos >= frame.len:
         raise newException(BlipException, "Missing flags in frame")
     let flags = frame[pos]
-    pos += 1
+    frame.moveStart(pos + 1)
     var msgType = MessageType(flags and kTypeMask)
-    let body = frame[pos .. ^1]
-    log Verbose, "<<< Rcvd frame: {msgType}#{uint(msgNo)} {flagsToString(flags)} {frame.len-pos} bytes"
+    log Verbose, "<<< Rcvd frame: {msgType}#{uint(msgNo)} {flagsToString(flags)} {frame.len} bytes"
 
     if msgType < kAckRequestType:
         # Handle an incoming request/response frame:
@@ -186,7 +191,7 @@ proc handleFrame(blip: Blip, frame: openarray[byte]) =
         else:
             blip.pendingResponse(flags, msgNo)
         # Append the frame to the message, and dispatch it if it's complete:
-        let ack = msg.addFrame(flags, body, blip.inChecksum)
+        let ack = msg.addFrame(flags, frame, blip.inBuffer, blip.inCodec)
         if ack != nil:
             blip.outbox.push(ack)
         if (flags and kMoreComing) == 0 and msgType == kRequestType:
@@ -196,11 +201,11 @@ proc handleFrame(blip: Blip, frame: openarray[byte]) =
         let findType = if msgType == kAckRequestType: kRequestType else: kResponseType
         let msg = blip.outbox.find(findType, msgNo)
         if msg != nil:
-            msg.handleAck(body)
+            msg.handleAck(frame.toOpenArray)
         else:
             let (i, msg) = blip.icebox.find(findType, msgNo)
             if msg != nil:
-                msg.handleAck(body)
+                msg.handleAck(frame.toOpenArray)
                 if not msg.needsAck:
                     log Info, "Unfreezing acked {msg}"
                     blip.icebox.del(i)
@@ -219,8 +224,9 @@ proc receiveLoop(blip: Blip) {.async.} =
                 log Error, "Transport receive error: {f.error.name} {f.error.msg}"
             break
         else:
-            let frame = f.read
-            if frame.len > 0:
+            let frameSeq = f.read
+            if frameSeq.len > 0:
+                var frame = frameSeq.toSubseq
                 blip.handleFrame(frame)
             else:
                 break
