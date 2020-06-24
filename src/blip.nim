@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import blip/[message, outbox, protocol, transport]
-import blip/private/[codec, log, subseq, varint]
+import blip/private/[codec, log, fixseq, varint]
 import asyncdispatch, strformat, strmisc, tables
 
 
@@ -28,8 +28,8 @@ type
         inNumber: MessageNo             # Number of latest incoming message
         incomingRequests: MessageMap    # Incoming partial request messages
         incomingResponses: MessageMap   # Incoming partial response messages
-        outBuffer: subseq[byte]         # Reuseable buffer for outgoing frames
-        inBuffer: subseq[byte]          # Reuseable buffer for incoming frames
+        outBuffer: fixseq[byte]         # Reuseable buffer for outgoing frames
+        inBuffer: fixseq[byte]          # Reuseable buffer for incoming frames
         outCodec: Deflater
         inCodec: Inflater
         defaultHandler: Handler         # Default callback to handle incoming requests
@@ -49,8 +49,8 @@ proc newBlip*(socket: Transport): Blip =
     result = Blip(socket: socket)
     result.outCodec = newDeflater()
     result.inCodec = newInflater()
-    result.outBuffer = newSubseq[byte](32768)
-    result.inBuffer = newSubseqOfCap[byte](32768)
+    result.outBuffer = newFixseq[byte](32768)
+    result.inBuffer = newFixseqOfCap[byte](32768)
 
 proc addHandler*(blip: Blip, profile: string, handler: Handler) =
     ## Registers a callback that will receive incoming messages with a specific "Profile" property.
@@ -169,7 +169,7 @@ proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
     else:
         log Warning, "No handler for incoming noreply request, profile='{profile}'"
 
-proc handleFrame(blip: Blip, frame: subseq[byte]) =
+proc handleFrame(blip: Blip, frame: fixseq[byte]) =
     # Read the flags and message number:
     var frame = frame
     if frame.len < 2:
@@ -230,7 +230,7 @@ proc receiveLoop(blip: Blip) {.async.} =
             break
 
         try:
-            blip.handleFrame(frame.toSubseq)
+            blip.handleFrame(frame.toFixseq)
         except BLIPException as e:
             logException e, "handling incoming frame"
             await blip.socket.close() # TODO: Set close code

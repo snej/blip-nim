@@ -19,7 +19,7 @@
 ## Important: These are Google (protobuf, Go) style varints, *not* the SQLite-style varints
 ## that Nim's ``varint`` package implements.
 
-import subseq
+import fixseq
 
 proc sizeOfVarint*(n: uint64): int =
     ## The number of bytes that a varint representation of ``n`` occupies.
@@ -41,7 +41,7 @@ proc putVarint*(buf: var openArray[byte]; n: uint64): int =
     buf[i] = byte(n)
     return i + 1
 
-type ByteSeq = seq[byte] | subseq[byte]
+type ByteSeq = seq[byte] | fixseq[byte]
 
 proc addVarint*(s: var ByteSeq; n: uint64) =
     ## Appends a varint to a byte sequence.

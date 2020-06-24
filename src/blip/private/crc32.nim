@@ -17,7 +17,7 @@
 ## CRC32 digest implementation,
 ## based on github.com/juancarlospaco/nim-crc32, which was "copied from RosettaCode".
 
-import subseq
+import fixseq
 from strutils import toHex
 
 type
@@ -58,7 +58,7 @@ func `+=`*(crc: var CRC32Accumulator, a: openarray[byte]) =
   for b in a:
     crc += b
 
-func `+=`*(crc: var CRC32Accumulator, a: subseq[byte]) =
+func `+=`*(crc: var CRC32Accumulator, a: fixseq[byte]) =
   ## Adds bytes to the accumulator.
   for b in a:
     crc += b

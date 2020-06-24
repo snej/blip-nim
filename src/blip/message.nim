@@ -16,7 +16,7 @@
 
 ## BLIP message implementation.
 
-import protocol, private/[codec, log, subseq, varint]
+import protocol, private/[codec, log, fixseq, varint]
 import asyncdispatch, strformat, strutils
 
 proc messageType(flags: byte): MessageType =
@@ -57,7 +57,7 @@ type
 
     MessageOut* = ref object of Message
         ## [INTERNAL ONLY] An outgoing message in the process of being sent.
-        data: subseq[byte]      ## Encoded message data (properties size + properties + body)
+        data: fixseq[byte]      ## Encoded message data (properties size + properties + body)
         bytesSent: int          ## Number of bytes sent
         unackedBytes: int       ## Number of sent bytes that haven't been ACKed
 
@@ -135,7 +135,7 @@ proc newMessageOut*(buf: sink MessageBuf): MessageOut =
     if buf.noReply:
         flags = flags or kNoReply
     # Encode the message into a byte sequence:
-    var data = newSubseqOfCap[byte](9 + buf.properties.len + buf.body.len)
+    var data = newFixseqOfCap[byte](9 + buf.properties.len + buf.body.len)
     if buf.messageType <= kErrorType:
         data.addVarint(uint64(buf.properties.len))
         data.add(buf.properties)
@@ -153,7 +153,7 @@ proc newACKMessage*(msg: MessageIn, bytesReceived: int): MessageOut =
 proc finished*(msg: MessageOut): bool =
     msg.data.len == 0
 
-proc nextFrame*(msg: MessageOut, frame: var subseq[byte], codec: Codec) =
+proc nextFrame*(msg: MessageOut, frame: var fixseq[byte], codec: Codec) =
     # [INTERNAL ONLY] Fills `frame` with the next frame to send.
     frame.clear()
     frame.addVarint(uint64(msg.number))
@@ -291,8 +291,8 @@ proc replyWithError*(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorM
 
 proc addFrame*(msg: MessageIn;
                flags: byte;
-               frame: subseq[byte];
-               buffer: subseq[byte];
+               frame: fixseq[byte];
+               buffer: fixseq[byte];
                codec: Codec): MessageOut =
     # [INTERNAL ONLY] Assembles the incoming message a frame at a time.
     # Note: `frame` does not include the frame flags and message number.

@@ -1,10 +1,10 @@
-# testSubseq.nim
+# testFixseq.nim
 
-import blip/private/subseq
+import blip/private/fixseq
 import unittest
 
-test "Subseq":
-    var s = newSubseq[byte](100)
+test "Fixseq":
+    var s = newFixseq[byte](100)
     check s.len == 100
     check s.cap == 100
     check s.spare == 0
@@ -48,14 +48,14 @@ test "Subseq":
 
 test "toSubSeq":
     var q = @["hi", "there"]
-    let qsub = toSubseq(q)
+    let qsub = toFixseq(q)
     check qsub[0] == "hi"
     check qsub[1] == "there"
     q[1] = "bye"
     check qsub[1] == "there"
 
 test "toOpenArray":
-    var s = newSubseq[byte](100)
+    var s = newFixseq[byte](100)
     for i in 0..99:
         s[i] = i.byte
     var ss = newSeq[byte]()
@@ -69,7 +69,7 @@ test "toOpenArray":
     check ss == @[5'u8, 6, 7, 8, 9]
 
 test "Grow":
-    var s = newSubseqOfCap[int](100)
+    var s = newFixseqOfCap[int](100)
     check s.len == 0
     check s.cap == 100
     check s.spare == 100

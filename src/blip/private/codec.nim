@@ -17,7 +17,7 @@
 ## Compression/decompression via the Deflate algorithm.
 ## (This code was ported from Codec.{cc,hh} in LiteCore.)
 
-import crc32, log, subseq
+import crc32, log, fixseq
 import endians, strformat, zip/zlib
 
 
@@ -45,8 +45,8 @@ proc initCodec(c: Codec) =
     c.checksum.reset()
 
 method write*(c: Codec;
-              input: var subseq[byte];
-              output: var subseq[byte];
+              input: var fixseq[byte];
+              output: var fixseq[byte];
               mode: Mode = DefaultMode) {.base.} =
     ## Processes bytes through the codec; could be deflate, inflate or passthrough.
     ## As many bytes as possible are read transferred, then ``input``'s start is moved forward
@@ -58,7 +58,7 @@ method unflushedBytes*(c: Codec): int {.base.} =
     ## of space.
     return 0
 
-proc writeChecksum*(c: Codec; output: var subseq[byte]) =
+proc writeChecksum*(c: Codec; output: var fixseq[byte]) =
     ## Writes the codec's current checksum to the output slice.
     ## This is a big-endian CRC32 checksum of all the unencoded data processed so far.
     let pos = output.len
@@ -67,7 +67,7 @@ proc writeChecksum*(c: Codec; output: var subseq[byte]) =
     bigEndian32(addr output[pos], unsafeAddr checksum)
     log Debug, "    wrote checksum {checksum:8x}"
 
-proc readAndVerifyChecksum*(c: Codec; input: var subseq[byte]) =
+proc readAndVerifyChecksum*(c: Codec; input: var fixseq[byte]) =
     ## Reads a checksum from the input slice and compares it with the codec's current one.
     ## If they aren't equal, throws an exception.
     if input.len < CRC32Size:
@@ -79,7 +79,7 @@ proc readAndVerifyChecksum*(c: Codec; input: var subseq[byte]) =
         raise newException(CodecException, &"Invalid checksum {inputChecksum:x}: should be {c.checksum.result:x}")
     input.moveStart(CRC32Size)
 
-proc writeRaw(c: Codec; input: var subseq[byte]; output: var subseq[byte], maxBytes: int) =
+proc writeRaw(c: Codec; input: var fixseq[byte]; output: var fixseq[byte], maxBytes: int) =
     ## Uncompressed write
     let n = min(min(input.len, output.spare), maxBytes)
     log Debug, "    Copying {n} bytes from {input.len}-byte input to {output.spare}-byte output (no compression)"
@@ -117,14 +117,14 @@ proc check(c: ZlibCodec; ret: int) =
     if ret < 0 and ret != Z_BUF_ERROR:
         raise newException(CodecException, &"Zlib error {ret}: {c.z.msg}")
 
-proc indexOfPtr(s: subseq[byte]; p: pointer): int =
+proc indexOfPtr(s: fixseq[byte]; p: pointer): int =
     result = cast[int](p)  - cast[int](unsafeAddr s[0])
     rangeCheck result in 0 .. s.len
 
 proc zwrite(c: ZlibCodec;
             operation: cstring,
-            input: var subseq[byte];
-            output: var subseq[byte];
+            input: var fixseq[byte];
+            output: var fixseq[byte];
             mode: Mode;
             maxInput: int) =
     ## Low-level wrapper around `deflate` / `inflate`. Mostly just translates between the Nim
@@ -166,8 +166,8 @@ proc newDeflater*(level: CompressionLevel = DefaultCompression): Deflater =
                  "1.2.11", sizeof(ZStream).cint))
 
 proc writeAndFlush(c: Deflater;
-              input: var subseq[byte];
-              output: var subseq[byte]) =
+              input: var fixseq[byte];
+              output: var fixseq[byte]) =
     const HeadroomForFlush = 12
     const StopAtOutputSize = 100
 
@@ -188,8 +188,8 @@ proc writeAndFlush(c: Deflater;
         c.zwrite("deflate", input, output, SyncFlush, 0)
 
 method write*(c: Deflater;
-              input: var subseq[byte];
-              output: var subseq[byte];
+              input: var fixseq[byte];
+              output: var fixseq[byte];
               mode: Mode) =
     let origInput = input
     var origOutput = output
@@ -239,11 +239,11 @@ proc newInflater*(): Inflater =
     result.flateProc = zlib.inflate
     result.check(inflateInit2(result.z, -ZlibWindowSize))
 
-let kTrailer = @[0x00'u8, 0x00, 0xFF, 0xFF].toSubseq
+let kTrailer = @[0x00'u8, 0x00, 0xFF, 0xFF].toFixseq
 
 method write*(c: Inflater;
-              input: var subseq[byte];
-              output: var subseq[byte];
+              input: var fixseq[byte];
+              output: var fixseq[byte];
               mode: Mode) =
     log Debug, "Decompressing {input.len} bytes into {output.spare}-byte buf"
     var origOutput = output

@@ -16,7 +16,7 @@
 
 import unittest
 
-import blip/message, blip/protocol, blip/private/[codec, log, subseq]
+import blip/message, blip/protocol, blip/private/[codec, log, fixseq]
 
 let kFrame1 = @['\x01',  # message#
                 '\x40',  # flags
@@ -50,7 +50,7 @@ test "Outgoing Message":
     check not msg.finished
 
     var codec = newDeflater()
-    var frame = newSubseqOfCap[byte](44)
+    var frame = newFixseqOfCap[byte](44)
     msg.nextFrame(frame, codec)
     check frame.len == 44
     var chars = cast[seq[char]](frame.toSeq)
@@ -68,14 +68,14 @@ test "Outgoing Message":
 test "Incoming Message":
     #CurrentLogLevel = Debug
 
-    let buffer = newSubseqOfCap[byte](1000)
+    let buffer = newFixseqOfCap[byte](1000)
     var codec = newInflater()
     let msg = newIncomingRequest(byte(kFrame1[1]), MessageNo(kFrame1[0]), nil)
-    var frame = cast[seq[byte]](kFrame1).toSubseq()
+    var frame = cast[seq[byte]](kFrame1).toFixseq()
     frame.moveStart(2)
     discard msg.addFrame(byte(kFrame1[1]), frame, buffer, codec)
     check not msg.finished
-    frame = cast[seq[byte]](kFrame2).toSubseq()
+    frame = cast[seq[byte]](kFrame2).toFixseq()
     frame.moveStart(2)
     discard msg.addFrame(byte(kFrame2[1]), frame, buffer, codec)
     check msg.finished
@@ -100,14 +100,14 @@ test "Frame Sizes":
     buf["Language"] = "French"
     buf.body = body
 
-    let buffer = newSubseqOfCap[byte](1000)
+    let buffer = newFixseqOfCap[byte](1000)
 
     #for frameSize in 8..len(buf.body)+100:
     for frameSize in 100..100:
         #echo frameSize, " byte frames"
         var outCodec = newDeflater()
         var inCodec = newInflater()
-        var frame = newSubseqOfCap[byte](frameSize)
+        var frame = newFixseqOfCap[byte](frameSize)
         var msgOut = newMessageOut(buf)
         msgOut.number = MessageNo(1)
         var msgIn: MessageIn = nil

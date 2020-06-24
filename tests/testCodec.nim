@@ -1,6 +1,6 @@
 # testCodec.nim
 
-import blip/private/[codec, log, subseq]
+import blip/private/[codec, log, fixseq]
 import unittest, strformat, strutils
 
 const InputText = """It was a dark and stormy night; the rain fell in torrents, except at
@@ -34,11 +34,11 @@ proc codecTest(inputText: string, mode: Mode) =
     var frames: seq[seq[byte]]
     var outputLen = 0
 
-    var buffer = newSubseqOfCap[byte](200)
+    var buffer = newFixseqOfCap[byte](200)
 
 
     var defl = newDeflater()
-    var input = cast[seq[byte]](inputText).toSubseq
+    var input = cast[seq[byte]](inputText).toFixseq
     while input.len > 0:
         var output = buffer
         defl.write(input, output, mode)
@@ -53,7 +53,7 @@ proc codecTest(inputText: string, mode: Mode) =
     var infl = newInflater()
     var result: seq[byte]
     for frame in frames:
-        var input = frame.toSubseq
+        var input = frame.toFixseq
         while input.len > 0:
             var output = buffer
             infl.write(input, output, mode)
