@@ -132,7 +132,8 @@ proc zwrite(c: ZlibCodec;
     assert mode > Mode.Raw
     let inSize = min(input.len, maxInput)
     c.z.availIn = Uint(inSize)
-    c.z.nextIn = cast[Pbytef](unsafeAddr input[0])
+    if input.len > 0:
+        c.z.nextIn = cast[Pbytef](unsafeAddr input[0])
 
     let outSpare = output.spare
     assert outSpare > 0
@@ -145,7 +146,8 @@ proc zwrite(c: ZlibCodec;
         log Debug, "    {operation}(in[0..{inSize-1}], out[0..{outSpare-1}], mode {mode})-> err {err}"
         output.resize(outLen)
         c.check(err)
-    input.moveStart(input.indexOfPtr(c.z.nextIn))
+    if input.len > 0:
+        input.moveStart(input.indexOfPtr(c.z.nextIn))
     output.resize(output.indexOfPtr(c.z.nextOut))
     log Debug, "    {operation}(in[0..{inSize-1}], out[0..{outSpare-1}], mode {mode})-> {output.len - outLen} bytes"
 

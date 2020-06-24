@@ -29,6 +29,7 @@ when isMainModule:
     var subprotocol = ""
     var echoMessages = false
     var logMessages = true
+    var compressMessages = false
 
     for kind, key, val in getopt(shortNoVal = {'v'}, longNoVal = @["verbose", "echo", "log"]):
         case kind
@@ -43,6 +44,7 @@ when isMainModule:
             of "path":      path = val
             of "protocol":  subprotocol = val
             of "log":       logMessages = true
+            of "compress":  compressMessages = true
             else:           fail &"Unknown flag '{key}'"
         else:
             fail("Unsupported parameter '{key}'")
@@ -51,15 +53,6 @@ when isMainModule:
         fail "Path must begin with '/'"
     echo &"Connecting to server at ws://localhost:{port}{path}"
 
-    proc handleResponse(msg: MessageIn) =
-        if logMessages:
-            echo "Got a response:"
-            for (k, v) in msg.properties:
-                echo "    ", k, " = ", v
-            if msg.body.len < 500:
-                echo "    \"", msg.body, "\""
-            else:
-                echo "    (", msg.body.len, "-byte body)"
 
     proc Run(blip: Blip) {.async.} =
         var n = 0
@@ -71,6 +64,7 @@ when isMainModule:
             msg.body = "This is test message #" & $n & ". "
             for i in countUp(1, 15):
                 msg.body = msg.body & msg.body
+            msg.compressed = compressMessages
             n += 1
             let f = msg.send()
             f.addCallback(proc (response: Future[MessageIn]) =
@@ -80,6 +74,7 @@ when isMainModule:
                         echo "Got response with body '", response.read.body, "'"
                     else:
                         echo "Got response with ", msg.body.len, "-byte body"
+                blip.close()
             )
             #await sleepAsync(0)
             break
@@ -89,6 +84,6 @@ when isMainModule:
         echo "Creating new Blip"
         var blip = newBlip(ws)
         await blip.run() and Run(blip)
-        echo "...Closed Blip"
+        echo "...BLIP connection has closed"
 
     waitfor DoIt()

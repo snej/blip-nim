@@ -16,7 +16,7 @@
 
 import blip/[message, outbox, protocol, transport]
 import blip/private/[codec, log, subseq, varint]
-import asyncdispatch, strformat, tables
+import asyncdispatch, strformat, strmisc, tables
 
 
 type
@@ -60,11 +60,11 @@ proc setDefaultHandler*(blip: Blip, handler: Handler) =
     ## Registers a callback that will receive incoming messages not processed by other handlers.
     blip.defaultHandler = handler
 
-proc close*(blip: Blip) {.async.} =
+proc close*(blip: Blip) =
     ## Shuts down the Blip object.
-    log Info, "BLIP closing"
+    log Info, "Closing by request..."
     blip.outbox.close()
-    await blip.socket.close()
+    asyncCheck blip.socket.close()
 
 # Sending:
 
@@ -117,9 +117,9 @@ proc sendLoop(blip: Blip) {.async.} =
         let f = blip.socket.send(buffer.toSeq)
         yield f
         if f.failed:
-            if f.error.name != "WebSocketClosedError":
-                log Error, "Transport send error: {f.error.name} {f.error.msg}"
+            logException f.error, "sending frame"
             break
+    log Debug, "sendLoop is done"
 
 
 # Receiving:
@@ -160,8 +160,8 @@ proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
     if handler != nil:
         try:
             handler(msg)
-        except:
-            log Error, "Handler for {msg}, profile '{profile}', raised exception: {getCurrentExceptionMsg()}"
+        except CatchableError as e:
+            logException e, "in handler for {msg}, profile '{profile}'"
             if not msg.noReply:
                 msg.replyWithError("BLIP", 501, "Handler failed unexpectedly")
     elif not msg.noReply:
@@ -169,8 +169,9 @@ proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
     else:
         log Warning, "No handler for incoming noreply request, profile='{profile}'"
 
-proc handleFrame(blip: Blip, frame: var subseq[byte]) =
+proc handleFrame(blip: Blip, frame: subseq[byte]) =
     # Read the flags and message number:
+    var frame = frame
     if frame.len < 2:
         log Error, "Received impossibly small frame"
         return
@@ -217,21 +218,29 @@ proc receiveLoop(blip: Blip) {.async.} =
     ## Async loop that receives WebSocket messages, reads them as BLIP frames, and assembles
     ## them into messages, until the connection is closed.
     while blip.socket.canReceive:
-        let f = blip.socket.receive()
-        yield f
-        if f.failed:
-            if f.error.name != "WebSocketClosedError":
-                log Error, "Transport receive error: {f.error.name} {f.error.msg}"
+        var frame: seq[byte]
+        try:
+            frame = await blip.socket.receive()
+        except CatchableError as e:
+            logException e, "on receive"
             break
-        else:
-            let frameSeq = f.read
-            if frameSeq.len > 0:
-                var frame = frameSeq.toSubseq
-                blip.handleFrame(frame)
-            else:
-                break
+
+        if frame.len == 0:
+            log Info, "BLIP connection closed cleanly"
+            break
+
+        try:
+            blip.handleFrame(frame.toSubseq)
+        except BLIPException as e:
+            logException e, "handling incoming frame"
+            await blip.socket.close() # TODO: Set close code
+        except CatchableError as e:
+            logException e, "handling incoming frame"
+            await blip.socket.close() # TODO: Set close code
+    log Debug, "receiveLoop is done"
 
 proc run*(blip: Blip): Future[void] =
     ## Runs the Blip's asynchronous send and receive loops.
     ## Returns a Future that completes when both loops have stopped.
-    return blip.sendLoop() and blip.receiveLoop()
+    asyncCheck blip.sendLoop()
+    return blip.receiveLoop()

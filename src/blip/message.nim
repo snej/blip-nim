@@ -38,6 +38,7 @@ type
         ## A mutable object for assembling a request or response before sending it.
         body*: string               ## Body of the message
         priority*: Priority         ## Message priority
+        compressed*: bool           ## True to compress message
         noReply*: bool              ## True if no reply should be sent [Requests only]
         properties: seq[byte]       ## Encoded properties/headers
         messageType: MessageType    ## Type of message (request/response/error)
@@ -129,6 +130,8 @@ proc newMessageOut*(buf: sink MessageBuf): MessageOut =
     var flags = byte(buf.messageType)
     if buf.priority == Urgent:
         flags = flags or kUrgent
+    if buf.compressed:
+        flags = flags or kCompressed
     if buf.noReply:
         flags = flags or kNoReply
     # Encode the message into a byte sequence:
@@ -163,7 +166,8 @@ proc nextFrame*(msg: MessageOut, frame: var subseq[byte], codec: Codec) =
         msg.data.reset()
         return
 
-    codec.write(msg.data, frame, Raw)
+    let codecMode = if (flags and kCompressed) != 0: DefaultMode else: Raw
+    codec.write(msg.data, frame, codecMode)
 
     if msg.data.len > 0:
         flags = flags or kMoreComing
@@ -294,9 +298,6 @@ proc addFrame*(msg: MessageIn;
     # Note: `frame` does not include the frame flags and message number.
     # Returns an ACK message to be sent to the peer, if one is necessary.
 
-    if (flags and kCompressed) != 0:
-        raise newException(BlipException, "Compressed frames are not supported yet")
-
     msg.rawBytesReceived += frame.len
     msg.unackedBytes += frame.len
 
@@ -310,11 +311,13 @@ proc addFrame*(msg: MessageIn;
         else:
             raise newException(BlipException, "Frame has inconsistent message type")
 
+    let codecMode = if (flags and kCompressed) != 0: DefaultMode else: Raw
+
     var inputRemaining = frame
     while inputRemaining.len > 0:
         log Verbose, "    processing {inputRemaining.len} bytes..."
         var decoded = buffer
-        codec.write(inputRemaining, decoded, Raw)
+        codec.write(inputRemaining, decoded, codecMode)
         var pos = 0;
 
         if msg.state == Start:

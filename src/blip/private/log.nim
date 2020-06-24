@@ -17,7 +17,7 @@
 ## This is a super basic logging implementation.
 ## (I didn't use the standard-library one because it uses globals, which async is allergic to.)
 
-import strformat
+import strformat, strmisc
 
 type LogLevel* = enum
     Error,
@@ -31,3 +31,7 @@ var CurrentLogLevel* = LogLevel.Warning
 template log*(level: LogLevel, message: typed) =
     if level <= CurrentLogLevel:
         echo "BLIP ", $level, ": ", &message
+
+template logException*(e: ref Exception, message: typed) =
+    if Error <= CurrentLogLevel:
+        echo "BLIP Error: Caught ", e.name, " '", e.msg.partition("\L")[0], "' ", &message
