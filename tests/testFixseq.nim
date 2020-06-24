@@ -68,6 +68,16 @@ test "toOpenArray":
     ss.add(s.toOpenArray(5, 9))
     check ss == @[5'u8, 6, 7, 8, 9]
 
+test "toString":
+    var sc = newFixseq[char](2)
+    sc[0] = 'H'
+    sc[1] = 'i'
+    check sc.toString == "Hi"
+    var sb = newFixseq[byte](2)
+    sb[0] = 'H'.byte
+    sb[1] = 'i'.byte
+    check sb.toString == "Hi"
+
 test "Grow":
     var s = newFixseqOfCap[int](100)
     check s.len == 0

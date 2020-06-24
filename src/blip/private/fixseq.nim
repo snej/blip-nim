@@ -47,6 +47,47 @@ proc toFixseq*[T](owner: seq[T]): fixseq[T] =
     return make[T](owner, owner.len, owner.len)
 
 
+# Accessors:
+
+proc len*[T](s: fixseq[T]): int  = s.len            ## The current length.
+proc high*[T](s: fixseq[T]): int = s.len - 1        ## The maximum index (``len - 1``)
+proc low*[T](s: fixseq[T]): int  = 0                ## The minimum index (``0``)
+proc cap*[T](s: fixseq[T]): int  = s.cap            ## The maximum the length can grow to
+proc spare*[T](s: fixseq[T]): int  = s.cap - s.len  ## How much it can grow (``cap - len``)
+
+
+# Item Accessors:
+
+proc normalize[T](s: fixseq[T], index: int): int =
+    rangeCheck index in 0 ..< s.len
+    return index
+
+proc normalize[T](s: fixseq[T], index: BackwardsIndex): int =
+    return s.normalize(s.len - int(index))
+
+
+proc `[]`*[T](s: fixseq[T], index: int or BackwardsIndex): lent T =
+    let index = s.normalize(index)
+    rangeCheck index in 0 ..< s.len
+    return s.data[index]
+
+proc `[]`*[T](s: var fixseq[T], index: int or BackwardsIndex): var T =
+    let index = s.normalize(index)
+    rangeCheck index in 0 ..< s.len
+    return s.data[index]
+
+proc `[]=`*[T](s: var fixseq[T], index: int or BackwardsIndex, value: sink T) =
+    let index = s.normalize(index)
+    rangeCheck index in 0 ..< s.len
+    s.data[index] = move(value)
+
+
+iterator items*[T](s: fixseq[T]): T =
+    ## Iterator over the items.
+    for i in 0 ..< s.len:
+        yield s.data[i]
+
+
 # Conversions:
 
 template toOpenArray*[T](s: fixseq[T]): openarray[T] =
@@ -66,90 +107,42 @@ proc toSeq*[T](s: fixseq[T]): seq[T] =
     for item in s:
         result.add(item)
 
-
-# Accessors:
-
-proc len*[T](s: fixseq[T]): int  = s.len            ## The current length.
-proc high*[T](s: fixseq[T]): int = s.len - 1        ## The maximum index (``len - 1``)
-proc low*[T](s: fixseq[T]): int  = 0                ## The minimum index (``0``)
-proc cap*[T](s: fixseq[T]): int  = s.cap            ## The maximum the length can grow to
-proc spare*[T](s: fixseq[T]): int  = s.cap - s.len  ## How much it can grow (``cap - len``)
+proc toString*(s: fixseq[byte] | fixseq[char]): string =
+    ## Returns a new string copied from a ``fixseq`` of bytes.
+    result = newString(s.len)
+    copyMem(addr result[0], unsafeAddr s[0], s.len)
 
 
-# Item Accessors:
+# Subrange Accessors:
 
-proc `[]`*[T](s: fixseq[T], index: int): lent T =
-    rangeCheck index in 0 ..< s.len
-    return s.data[index]
-
-proc `[]`*[T](s: fixseq[T], index: BackwardsIndex): lent T =
-    rangeCheck int(index) in 0 ..< s.len
-    return s.data[s.len - int(index)]
-
-proc `[]`*[T](s: var fixseq[T], index: int): var T =
-    rangeCheck index in 0 ..< s.len
-    return s.data[index]
-
-proc `[]`*[T](s: var fixseq[T], index: BackwardsIndex): var T =
-    rangeCheck int(index) in 0 ..< s.len
-    return s.data[s.len - int(index)]
-
-proc `[]=`*[T](s: var fixseq[T], index: int, value: sink T) =
-    rangeCheck index in 0 ..< s.len
-    s.data[index] = move(value)
-
-proc `[]=`*[T](s: var fixseq[T], index: BackwardsIndex, value: sink T) =
-    rangeCheck int(index) in 0 ..< s.len
-    s.data[s.len - index] = move(value)
-
-iterator items*[T](s: fixseq[T]): T =
-    ## Iterator over the items.
-    for i in 0 ..< s.len:
-        yield s.data[i]
+proc normalize[T, S1, S2](s: fixseq[T], range: HSlice[S1, S2]): (int, int) {.inline.} =
+    let rstart = s.normalize(range.a)
+    let rlen = max(0, s.normalize(range.b) - rstart + 1)
+    rangeCheck rstart >= 0 and rstart + rlen <= s.len
+    return (rstart, rlen)
 
 
-# Subrange Getters:
-
-proc `[]`*[T](s: fixseq[T], range: Slice[int]): fixseq[T] =
+proc `[]`*[T, S1, S2](s: fixseq[T], range: HSlice[S1, S2]): fixseq[T] =
     ## Returns a new ``fixseq`` on a subrange of the buffer.
-    ## The new object has capacity limited to its length, i.e. it cannot be grown. This allows you
-    ## to trust that it cannot be used to access memory outside the range it was given.
-    rangeCheck range.a >= 0 and range.b < s.len
-    let data = uArrayAt(s.data[range.a])
-    return fixseq[T](owner: s.owner, data: data, len: range.len, cap: range.len)
+    ## The new object has capacity limited to its length, i.e. it cannot be grown.
+    ## This ensures it cannot be used to access memory outside the range it was given.
+    let (rstart, rlen) = s.normalize(range)
+    let data = uArrayAt(s.data[rstart])
+    return fixseq[T](owner: s.owner, data: data, len: rlen, cap: rlen)
 
-proc `[]`*[T](s: fixseq[T], range: HSlice[int, BackwardsIndex]): fixseq[T] =
-    ## Returns a new ``fixseq`` on a subrange of the buffer.
-    ## The new object has capacity limited to its length, i.e. it cannot be grown. This allows you
-    ## to trust that it cannot be used to access memory outside the range it was given.
-    return s[range.a .. (s.len - int(range.b))]
-
-proc `[]`*[T](s: fixseq[T], range: HSlice[BackwardsIndex, BackwardsIndex]): fixseq[T] =
-    ## Returns a new ``fixseq`` on a subrange of the buffer.
-    ## The new object has capacity limited to its length, i.e. it cannot be grown. This allows you
-    ## to trust that it cannot be used to access memory outside the range it was given.
-    return s[(s.len - int(range.a)) .. (s.len - int(range.b))]
-
-
-# Subrange Setters:
-
-proc `[]=`*[T](s: var fixseq[T], range: Slice[int], values: openarray[T]) =
+proc `[]=`*[T, S1, S2](s: var fixseq[T], range: HSlice[S1, S2], values: openarray[T]) =
     ## Replaces a range of items, copying from an array.
-    rangeCheck range.a >= 0 and range.b < s.len
-    rangeCheck range.len == values.len
-    var i = range.a
+    let (rstart, rlen) = s.normalize(range)
+    rangeCheck rlen == values.len
+    var i = rstart
     for item in values:
         s[i] = item
         i += 1
     #FIXME: This won't work right when `values` overlaps with me!
 
-proc `[]=`*[T](s: var fixseq[T], range: Slice[int], values: fixseq[T]) =
+proc `[]=`*[T, S1, S2](s: var fixseq[T], range: HSlice[S1, S2], values: fixseq[T]) =
     ## Replaces a range of items, copying from another fixseq.
     s[range] = values.toOpenArray
-
-proc `[]=`*[T](s: var fixseq[T], range: HSlice[int, BackwardsIndex], values: fixseq[T]) =
-    ## Replaces a range of items, copying from another fixseq.
-    s[range.a .. (s.len - int(range.b))] = values.toOpenArray
 
 
 # Updating:
