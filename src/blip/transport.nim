@@ -90,7 +90,7 @@ method canSend*(t: WebSocketTransport): bool =
     return t.socket.readyState == Open
 
 method canReceive*(t: WebSocketTransport): bool =
-    return t.socket.readyState == Open
+    return t.socket.readyState == Open or t.socket.readyState == Closing
 
 method send*(t: WebSocketTransport; frame: fixseq[byte]) {.async.} =
     let f = t.socket.send(frame.toString, Opcode.Binary)

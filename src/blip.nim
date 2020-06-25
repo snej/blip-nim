@@ -157,6 +157,11 @@ proc pendingResponse(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
         blip.incomingResponses.del(msgNo)   # Response is complete, no need to track this
     return msg
 
+proc cancelPendingMessages(blip: Blip) =
+    for n, msg in blip.incomingResponses:
+        msg.cancel()
+    blip.incomingResponses = MessageMap()
+
 proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
     ## Calls the appropriate client-registered handler proc for an incoming request message.
     let profile = msg.profile
@@ -242,6 +247,7 @@ proc receiveLoop(blip: Blip) {.async.} =
         except CatchableError as e:
             logException e, "handling incoming frame"
             await blip.socket.close() # TODO: Set close code
+    blip.cancelPendingMessages()
     log Debug, "receiveLoop is done"
 
 proc run*(blip: Blip): Future[void] =

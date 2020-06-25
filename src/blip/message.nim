@@ -358,3 +358,17 @@ proc createCompletionFuture*(msg: MessageIn): Future[MessageIn] =
     if msg.completionFuture == nil:
         msg.completionFuture = newFuture[MessageIn]("BLIP response")
     return msg.completionFuture
+
+proc cancel*(msg: MessageIn; errDomain = BLIPErrorDomain, errCode = 502, errMsg = "Disconnected") =
+    # [INTERNAL ONLY] Notify client of an error receiving a response, usually because the
+    # socket was disconnected before the response arrived.
+    let f = msg.completionFuture
+    if f != nil:
+        # Make myself an error response:
+        var buf = msg.createErrorResponse(errDomain, errCode, errMsg)
+        msg.flags = withMessageType(msg.flags, kErrorType)
+        msg.state = Complete
+        msg.propertyBuf = cast[seq[byte]](buf.properties)
+        msg.body = cast[seq[byte]](buf.body)
+        # Now deliver to the Future's observer:
+        f.complete(msg)
