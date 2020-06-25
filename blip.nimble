@@ -5,8 +5,9 @@ author        = "Jens Alfke"
 description   = "BLIP protocol implementation"
 license       = "Apache-2.0"
 srcDir        = "src"
+binDir        = "bin"
 installExt    = @["nim"]
-bin           = @["server", "client"]
+bin           = @["../examples/server", "../examples/client"]
 
 # Dependencies
 
