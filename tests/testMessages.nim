@@ -127,5 +127,5 @@ test "Frame Sizes":
 
         var props: string
         for (k, v) in msgIn.properties:
-            props &= k & "=" & v & ","
+            props &= $k & "=" & $v & ","
         check props == "Profile=Insult,Language=French,"

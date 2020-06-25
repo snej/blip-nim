@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import protocol, private/log
+import protocol, private/[fixseq, log]
 import asyncdispatch, asyncnet, asynchttpserver, news, strformat, strtabs, strutils
 
 proc abstract() = raise newException(AssertionError, "Unimplemented abstract method")
@@ -34,10 +34,10 @@ method canSend*(t: Transport): bool {.base.} =
 method canReceive*(t: Transport): bool {.base.} =
     ## Returns true if the Transport is open for receiving frames.
     abstract()
-method send*(t: Transport; frame: seq[byte]) {.base, async.} =
+method send*(t: Transport; frame: fixseq[byte]) {.base, async.} =
     ## Sends a frame. If there is backpressure this method will block until the frame is sent.
     abstract()
-method receive*(t: Transport): Future[seq[byte]] {.base, async.} =
+method receive*(t: Transport): Future[fixseq[byte]] {.base, async.} =
     ## Waits for and returns the next frame.
     ## If the transport was closed cleanly, returns an empty frame.
     ## Other errors are thrown as exceptions (including unexpected disconnects.)
@@ -49,8 +49,6 @@ method receive*(t: Transport): Future[seq[byte]] {.base, async.} =
 type WebSocketTransport* = ref object of Transport
     ## BLIP Transport implementation using a WebSocket
     socket: WebSocket
-    sentClose: bool       # workaround for news not implementing WS close handshake
-    receivedClose: bool
 
 proc newWebSocketTransport*(socket: WebSocket): WebSocketTransport =
     ## Wraps a Transport around an existing WebSocket object.
@@ -86,10 +84,7 @@ method disconnect*(t: WebSocketTransport) =
     t.socket.close()
 
 method close*(t: WebSocketTransport) {.async.} =
-    if not t.sentClose:
-        log Verbose, "Initiating WebSocket CLOSE"
-        t.sentClose = true
-        await t.socket.send("", Opcode.Close)
+    await t.socket.shutdown()
 
 method canSend*(t: WebSocketTransport): bool =
     return t.socket.readyState == Open
@@ -97,34 +92,22 @@ method canSend*(t: WebSocketTransport): bool =
 method canReceive*(t: WebSocketTransport): bool =
     return t.socket.readyState == Open
 
-method send*(t: WebSocketTransport; frame: seq[byte]) {.async.} =
-    let f = t.socket.send(cast[string](frame), Opcode.Binary)
+method send*(t: WebSocketTransport; frame: fixseq[byte]) {.async.} =
+    let f = t.socket.send(frame.toString, Opcode.Binary)
     yield f
-    if f.failed and f.error.name == "WebSocketClosedError" and t.sentClose and t.receivedClose:
+    if f.failed and f.error.name == "WebSocketClosedError" and t.socket.readyState >= Closing:
         log Verbose, "Transport closed cleanly"
     else:
         await f
 
-method receive*(t: WebSocketTransport): Future[seq[byte]] {.async.} =
-    try:
-        while t.socket.readyState == Open:
-            let packet = await t.socket.receivePacket()
-            case packet.kind
-                of Binary:
-                    return cast[seq[byte]](packet.data)
-                of Close:
-                    log Verbose, "Received WebSocket CLOSE"
-                    t.receivedClose = true
-                    if t.sentClose:
-                        t.socket.close()
-                    else:
-                        log Verbose, "Confirming WebSocket CLOSE"
-                        await t.socket.send("", Opcode.Close)
-                        t.sentClose = true
-                else:
-                    log Warning, "Ignoring WebSocket frame of type {$packet.kind}"
-    except WebSocketClosedError as e:
-        if not (t.sentClose and t.receivedClose):
-            log Warning, "Unexpected socket close (sentClose={t.sentClose}, rcvdClose={t.receivedClose})"
-            raise e
-    return @[]
+method receive*(t: WebSocketTransport): Future[fixseq[byte]] {.async.} =
+    while t.socket.readyState == Open:
+        let packet = await t.socket.receivePacket()
+        case packet.kind
+            of Binary:
+                return packet.data.toFixseq
+            of Close:
+                break
+            else:
+                log Warning, "Ignoring WebSocket frame of type {$packet.kind}"
+    # On close, return an empty frame

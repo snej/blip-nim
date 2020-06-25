@@ -57,16 +57,9 @@ proc codecTest(inputText: string, mode: Mode) =
         while input.len > 0:
             var output = buffer
             infl.write(input, output, mode)
-
-            # echo "-- ", cast[string](output.toOpenArray)
-            # result &= output.toOpenArray
-
-            output.with(proc(bytes: openarray[byte]) =
-                let byteseq = @bytes  # shouldn't be necessary but is: https://forum.nim-lang.org/t/6477
-                echo "-- ", cast[string](byteseq)
-                result &= bytes
-            )
-
+            let str = output.toString
+            echo "-- ", str
+            result &= output.toSeq
 
     let resultStr = cast[string](result)
     echo "Decompressed = '", resultStr, "'"

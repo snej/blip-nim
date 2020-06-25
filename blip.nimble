@@ -12,5 +12,5 @@ bin           = @["server", "client"]
 
 requires "nim >= 1.2.0"
 
-requires "news >= 0.4.0"
+requires "news >= 0.5.0"
 requires "zip  >= 0.2.1"

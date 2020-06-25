@@ -18,22 +18,23 @@ import blip/[message, outbox, protocol, transport]
 import blip/private/[codec, log, fixseq, varint]
 import asyncdispatch, strformat, strmisc, tables
 
+export message, transport
 
 type
     Blip* = ref object
-        socket: Transport               # The WebSocket
-        outbox: Outbox                  # Messages being sent
-        icebox: Icebox                  # Messages paused until an Ack is received
-        outNumber: MessageNo            # Number of latest outgoing message
-        inNumber: MessageNo             # Number of latest incoming message
-        incomingRequests: MessageMap    # Incoming partial request messages
-        incomingResponses: MessageMap   # Incoming partial response messages
-        outBuffer: fixseq[byte]         # Reuseable buffer for outgoing frames
-        inBuffer: fixseq[byte]          # Reuseable buffer for incoming frames
-        outCodec: Deflater
-        inCodec: Inflater
-        defaultHandler: Handler         # Default callback to handle incoming requests
-        handlers: Table[string, Handler]# Callbacks for requests with specific "Profile"s
+        socket: Transport                # The WebSocket
+        outbox: Outbox                   # Messages being sent
+        icebox: Icebox                   # Messages paused until an Ack is received
+        outNumber: MessageNo             # Number of latest outgoing message
+        inNumber: MessageNo              # Number of latest incoming message
+        incomingRequests: MessageMap     # Incoming partial request messages
+        incomingResponses: MessageMap    # Incoming partial response messages
+        outBuffer: fixseq[byte]          # Reuseable buffer for outgoing frames
+        inBuffer: fixseq[byte]           # Reuseable buffer for incoming frames
+        outCodec: Deflater               # Compresses outgoing frames
+        inCodec: Inflater                # Decompresses incoming frames
+        defaultHandler: Handler          # Default callback to handle incoming requests
+        handlers: Table[string, Handler] # Callbacks for requests with specific "Profile"s
 
     MessageMap = Table[MessageNo, MessageIn]
 
@@ -66,11 +67,12 @@ proc close*(blip: Blip) =
     blip.outbox.close()
     asyncCheck blip.socket.close()
 
+
 # Sending:
 
 proc sendRequestProc(blip: Blip): SendProc =
     # Returns a proc that will send a MessageOut as a request
-    return proc(msg: MessageOut): Future[MessageIn] =
+    return proc(msg: sink MessageOut): Future[MessageIn] =
         assert msg.messageType == kRequestType
         let msgNo = ++blip.outNumber
         msg.number = msgNo
@@ -84,7 +86,7 @@ proc sendRequestProc(blip: Blip): SendProc =
 
 proc sendResponseProc(blip: Blip): SendProc =
     # Returns a proc that will send a MessageOut as a response
-    return proc(msg: MessageOut): Future[MessageIn] =
+    return proc(msg: sink MessageOut): Future[MessageIn] =
         assert msg.messageType != kRequestType
         assert(msg.number != MessageNo(0))
         blip.outbox.push(msg)
@@ -93,6 +95,7 @@ proc sendResponseProc(blip: Blip): SendProc =
 
 proc newRequest*(blip: Blip, profile: string = ""): MessageBuf =
     result = newMessage(blip.sendRequestProc())
+    ## Creates a new request message.
     if profile != "":
         result.profile = profile
 
@@ -114,7 +117,7 @@ proc sendLoop(blip: Blip) {.async.} =
             else:
                 blip.outbox.push(msg)
 
-        let f = blip.socket.send(buffer.toSeq)
+        let f = blip.socket.send(buffer)
         yield f
         if f.failed:
             logException f.error, "sending frame"
@@ -155,6 +158,7 @@ proc pendingResponse(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
     return msg
 
 proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
+    ## Calls the appropriate client-registered handler proc for an incoming request message.
     let profile = msg.profile
     let handler = blip.handlers.getOrDefault(profile, blip.defaultHandler)
     if handler != nil:
@@ -170,6 +174,7 @@ proc dispatchIncomingRequest(blip: Blip, msg: MessageIn) =
         log Warning, "No handler for incoming noreply request, profile='{profile}'"
 
 proc handleFrame(blip: Blip, frame: fixseq[byte]) =
+    ## Processes an incoming message frame.
     # Read the flags and message number:
     var frame = frame
     if frame.len < 2:
@@ -215,10 +220,10 @@ proc handleFrame(blip: Blip, frame: fixseq[byte]) =
                 log Warning, "Received {$msgType} for unknown message #{uint64(msgNo)}"
 
 proc receiveLoop(blip: Blip) {.async.} =
-    ## Async loop that receives WebSocket messages, reads them as BLIP frames, and assembles
-    ## them into messages, until the connection is closed.
+    ## Async loop that receives WebSocket messages and passes them to `handleFrame`,
+    ## until the socket closes.
     while blip.socket.canReceive:
-        var frame: seq[byte]
+        var frame: fixseq[byte]
         try:
             frame = await blip.socket.receive()
         except CatchableError as e:
@@ -230,7 +235,7 @@ proc receiveLoop(blip: Blip) {.async.} =
             break
 
         try:
-            blip.handleFrame(frame.toFixseq)
+            blip.handleFrame(frame)
         except BLIPException as e:
             logException e, "handling incoming frame"
             await blip.socket.close() # TODO: Set close code

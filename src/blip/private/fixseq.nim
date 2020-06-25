@@ -46,6 +46,11 @@ proc toFixseq*[T](owner: seq[T]): fixseq[T] =
     ## Its capacity will be equal to its current length.
     return make[T](owner, owner.len, owner.len)
 
+proc toFixseq*(str: string): fixseq[byte] =
+    ## Creates a ``fixseq`` copied from a string.
+    ## Its capacity will be equal to its current length.
+    return make[byte](cast[seq[byte]](str), str.len, str.len)
+
 
 # Accessors:
 
@@ -110,7 +115,7 @@ proc toSeq*[T](s: fixseq[T]): seq[T] =
 proc toString*(s: fixseq[byte] | fixseq[char]): string =
     ## Returns a new string copied from a ``fixseq`` of bytes.
     result = newString(s.len)
-    copyMem(addr result[0], unsafeAddr s[0], s.len)
+    copyMem(addr result[0], unsafeAddr s.data[0], s.len)
 
 
 # Subrange Accessors:
@@ -136,7 +141,7 @@ proc `[]=`*[T, S1, S2](s: var fixseq[T], range: HSlice[S1, S2], values: openarra
     rangeCheck rlen == values.len
     var i = rstart
     for item in values:
-        s[i] = item
+        s.data[i] = item
         i += 1
     #FIXME: This won't work right when `values` overlaps with me!
 
@@ -181,7 +186,7 @@ proc add*[T](s: var fixseq[T], value: sink T) =
     ## Throws a range error if the length is already equal to the capacity.
     let pos = s.len
     s.resize(pos + 1)
-    s[pos] = value
+    s.data[pos] = value
 
 proc add*[T](s: var fixseq[T], values: openarray[T]) =
     ## Appends an array of values.
@@ -189,3 +194,19 @@ proc add*[T](s: var fixseq[T], values: openarray[T]) =
     let pos = s.len
     s.resize(pos + values.len)
     s[pos ..< s.len] = values
+
+proc add*(s: var fixseq[byte], str: string) =
+    let pos = s.len
+    s.resize(pos + str.len)
+    copyMem(unsafeaddr s.data[pos], unsafeaddr str[0], str.len)
+
+# Reading (popping):
+
+proc readFirst[T](s: var fixseq[T]): T =
+    result = s[0]
+    s.moveStart(1)
+
+proc read*[T](s: var fixseq[T], n: int): fixseq[T] =
+    result = s[0 ..< n]
+    s.moveStart(n)
+

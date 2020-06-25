@@ -14,40 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-## CRC32 digest implementation,
-## based on github.com/juancarlospaco/nim-crc32, which was "copied from RosettaCode".
+## CRC32 digest API, using the implementation in zlib.
 
-import fixseq
-from strutils import toHex
+import zip/zlib
 
 type
   CRC32* = uint32
 
   CRC32Accumulator* = object
     ## CRC32 digest generator. Add bytes to it with `+=`, then get its `result`.
-    state: CRC32
+    state: Ulong
 
 const CRC32Size* = 4
 
-
-func createCrcTable(): array[0..255, uint32] {.inline.} =
-  for i in 0..255:
-    var rem = uint32(i)
-    for j in 0..7:
-      if (rem and 1) > 0'u32: rem = (rem shr 1) xor uint32(0xedb88320)
-      else: rem = rem shr 1
-    result[i] = rem
-
-const crc32table = createCrcTable()
+assert CRC32Size == sizeof(CRC32)
 
 
 func reset*(crc: var CRC32Accumulator) {.inline.} =
-  ## Rests an accumulator back to its initial state (FFFFFFFF).
-  crc.state = not CRC32(0)
+  ## Rests an accumulator back to its initial state.
+  crc.state = 0   # = crc32(0, nil, 0)
 
 func `+=`*(crc: var CRC32Accumulator, b: byte) {.inline.} =
   ## Adds a byte to the accumulator.
-  crc.state = (crc.state shr 8) xor crc32table[(crc.state and 0xff) xor uint32(b)]
+  crc.state = crc32(crc.state, cast[Pbytef](unsafeaddr b), 1.Uint)
 
 func `+=`*(crc: var CRC32Accumulator, c: char) {.inline.} =
   ## Adds a character (byte) to the accumulator.
@@ -55,26 +44,18 @@ func `+=`*(crc: var CRC32Accumulator, c: char) {.inline.} =
 
 func `+=`*(crc: var CRC32Accumulator, a: openarray[byte]) =
   ## Adds bytes to the accumulator.
-  for b in a:
-    crc += b
-
-func `+=`*(crc: var CRC32Accumulator, a: fixseq[byte]) =
-  ## Adds bytes to the accumulator.
-  for b in a:
-    crc += b
+  if a.len > 0:
+    crc.state = crc32(crc.state, cast[Pbytef](unsafeaddr a[0]), a.len.Uint)
 
 func `+=`*(crc: var CRC32Accumulator, s: string) =
   ## Adds the bytes of the UTF-8 encoded string to the accumulator.
-  for c in s:
-    crc += c
+  if s.len > 0:
+    crc.state = crc32(crc.state, cast[Pbytef](unsafeaddr s[0]), s.len.Uint)
+
 
 func result*(crc: CRC32Accumulator): CRC32 {.inline.} =
   ## The CRC32 checksum of all bytes added to the accumulator so far.
-  return not crc.state
-
-proc `$`*(crc: CRC32Accumulator): string =
-  ## Returns the current digest as an 8-character hex string.
-  result = crc.result.int64.toHex(8)
+  return CRC32(crc.state)
 
 
 # Convenience functions:
@@ -114,4 +95,16 @@ proc crc32FromFile*(filename: string): CRC32 =
 
 
 when is_main_module:
-  echo crc32("The quick brown fox jumps over the lazy dog.")
+  import unittest
+
+  check crc32("") == 0
+
+  check crc32("The quick brown fox jumps over the lazy dog.") == 0x519025E9'u32
+
+  var a: CRC32Accumulator
+  a += "The quick brown fox"
+  check a.result == 0xB74574DE'u32
+  a += " jumps over the lazy dog."
+  check a.result == 0x519025E9'u32
+
+

@@ -263,6 +263,6 @@ method write*(c: Inflater;
 
     let bytesWritten = output.len - origOutput.len
     output.resize(bytesWritten)
-    c.checksum += output[origOutput.len ..< output.len]
+    c.checksum += output[origOutput.len ..< output.len].toOpenArray
     if input.len <= CRC32Size:
         c.readAndVerifyChecksum(input)

@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-## Constants and types defined by the BLIP protocol.
+## Constants and types defined by the BLIP protocol. For internal use only.
 ##
 ## Specification: https://github.com/couchbaselabs/BLIP-Cpp/blob/master/docs/BLIP%20Protocol.md
 

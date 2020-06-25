@@ -16,7 +16,7 @@
 
 ## A very basic BLIP client program for testing purposes.
 
-import blip, blip/[message, transport]
+import blip
 import asyncdispatch, parseopt, strformat, strutils
 
 when isMainModule:

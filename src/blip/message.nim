@@ -40,13 +40,13 @@ type
         priority*: Priority         ## Message priority
         compressed*: bool           ## True to compress message
         noReply*: bool              ## True if no reply should be sent [Requests only]
-        properties: seq[byte]       ## Encoded properties/headers
+        properties: string          ## Encoded properties/headers
         messageType: MessageType    ## Type of message (request/response/error)
         re: MessageNo               ## If a response, the peer message# it's replying to
         sendProc: SendProc          ## Call this to send the message (points to Blip method)
 
     Priority* = enum
-        ## A message's priority. Urgent messages get delivered quicker.
+        ## A message's priority. Urgent messages get more bandwidth.
         Normal
         Urgent
 
@@ -78,21 +78,21 @@ type
         ReadingBody
         Complete
 
-    SendProc* = proc(msg: MessageOut): Future[MessageIn] {.gcsafe.}
+    SendProc* = proc(msg: sink MessageOut): Future[MessageIn] {.closure, gcsafe.}
 
 
 # MessageBuf
 
+#(NOTE: body, priority, compressed, and noReply are public fields that can be set directly.)
+
 proc newMessage*(sendProc: SendProc): MessageBuf =
-    ## Creates a new message you can add properties and/or a body to.
+    # [INTERNAL ONLY] Creates a new message you can add properties and/or a body to.
     return MessageBuf(sendProc: sendProc)
 
 proc `[]=`*(buf: var MessageBuf, key: string, val: string) =
     ## Adds a property key/value to a message.
-    buf.properties.add(cast[seq[byte]](key))
-    buf.properties.add(0)
-    buf.properties.add(cast[seq[byte]](val))
-    buf.properties.add(0)
+    assert key.find('\0') < 0 and val.find('\0') < 0
+    buf.properties = buf.properties & key & '\0' & val & '\0'
 
 proc add*(buf: var MessageBuf, kv: openarray[(string,string)]) =
     ## Adds multiple properties to a message.
@@ -103,7 +103,7 @@ proc `profile=`*(buf: var MessageBuf, profile: string) =
     buf[ProfileProperty] = profile
 
 
-# Message
+# Message (common between MessageOut and MessageIn)
 
 proc priority*(msg: Message): Priority  =
     if (msg.flags and kUrgent) != 0: Urgent else: Normal
@@ -123,6 +123,7 @@ proc `number=`*(msg: Message, n: MessageNo) =
 proc `$`*(msg: Message): string =
     $(msg.messageType) & '#' & $uint(msg.number)
 
+
 # MessageOut
 
 proc newMessageOut*(buf: sink MessageBuf): MessageOut =
@@ -139,10 +140,10 @@ proc newMessageOut*(buf: sink MessageBuf): MessageOut =
     if buf.messageType <= kErrorType:
         data.addVarint(uint64(buf.properties.len))
         data.add(buf.properties)
-    data.add(cast[seq[byte]](buf.body))
+    data.add(buf.body)
     return MessageOut(flags: flags, number: buf.re, data: data)
 
-proc newACKMessage*(msg: MessageIn, bytesReceived: int): MessageOut =
+proc newAckMessage*(msg: MessageIn, bytesReceived: int): MessageOut =
     let ackType = if msg.messageType == kRequestType: kAckRequestType else: kAckResponseType
     var buf = MessageBuf(priority: Urgent, noReply: true, messageType: ackType, re: msg.number)
     var body = newSeqOfCap[byte](4)
@@ -151,7 +152,7 @@ proc newACKMessage*(msg: MessageIn, bytesReceived: int): MessageOut =
     return newMessageOut(buf)
 
 proc finished*(msg: MessageOut): bool =
-    msg.data.len == 0
+    return msg.data.len == 0
 
 proc nextFrame*(msg: MessageOut, frame: var fixseq[byte], codec: Codec) =
     # [INTERNAL ONLY] Fills `frame` with the next frame to send.
@@ -189,7 +190,9 @@ proc handleAck*(msg: MessageOut, body: openarray[byte]) =
 
 
 proc send*(buf: sink MessageBuf): Future[MessageIn] =
-    return buf.sendProc(newMessageOut(buf))
+    let p = buf.sendProc
+    assert p != nil
+    return p(newMessageOut(buf))
 
 proc sendNoReply*(buf: sink MessageBuf) =
     buf.noReply = true
@@ -197,7 +200,6 @@ proc sendNoReply*(buf: sink MessageBuf) =
 
 
 # MessageIn
-
 
 proc newIncomingRequest*(flags: byte; number: MessageNo, replyProc: SendProc): MessageIn =
     # [INTERNAL ONLY] Creates a MessageIn for a new request coming from the peer.
@@ -212,24 +214,22 @@ proc newPendingResponse*(request: MessageOut): MessageIn =
     let flags = request.flags.withMessageType(kResponseType)
     return MessageIn(flags: flags, number: request.number, replyProc: nil)
 
-proc readCString(str: var openarray[byte]; pos: var int): string =
-    # No range checking here; we let the runtime throw a range error if props are invalid.
-    var i = pos
-    while str[i] != 0: i += 1
-    result = cast[string](str[pos ..< i])
-    pos = i + 1
+proc skipCString(str: cstring): cstring =
+    return cast[cstring]( cast[int](str) + str.len + 1 )
 
-iterator properties*(msg: MessageIn): (string, string) =
+iterator properties*(msg: MessageIn): (cstring, cstring) =
     assert msg.state > ReadingProperties
-    var pos = 0
-    while pos < msg.propertyBuf.len:
-        let key = readCString(msg.propertyBuf, pos)
-        let val = readCString(msg.propertyBuf, pos)
+    var pos = cast[cstring](addr msg.propertyBuf[0])
+    let endProps = cast[cstring](addr msg.propertyBuf[msg.propertyBuf.high])
+    while pos < endProps:
+        let key = pos
+        let val = skipCString(key)
+        pos = skipCString(val)
         yield (key, val)
 
 proc property*(msg: MessageIn; key: string; default: string = ""): string =
     for (k, v) in msg.properties:
-        if k == key: return v
+        if k == key: return $v
     return default
 
 proc intProperty*(msg: MessageIn; key: string; defaultValue: int = 0): int =
@@ -262,6 +262,7 @@ proc body*(msg: MessageIn): string =
     return cast[string](msg.body)
 
 proc newResponseBuf(msg: MessageIn, messageType: MessageType): MessageBuf =
+    assert msg.replyProc != nil
     MessageBuf(messageType: messageType, priority: msg.priority, noReply: true, re: msg.number,
                sendProc: msg.replyProc)
 
@@ -341,8 +342,9 @@ proc addFrame*(msg: MessageIn;
         if msg.state < ReadingBody:
             raise newException(BlipException, "Incomplete message properties")
         msg.state = Complete
-        if msg.completionFuture != nil:
-            msg.completionFuture.complete(msg)
+        let f = msg.completionFuture
+        if f != nil:
+            f.complete(msg)
         return nil
     elif msg.unackedBytes >= kIncomingAckThreshold:
         # Tell Blip to send back an ACK:

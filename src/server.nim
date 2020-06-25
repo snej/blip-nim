@@ -16,7 +16,7 @@
 
 ## A very basic BLIP server program for testing purposes.
 
-import blip, blip/[message, transport], blip/private/log
+import blip, blip/private/log
 import asyncdispatch, asynchttpserver, parseopt, strformat, strutils
 
 when isMainModule:
