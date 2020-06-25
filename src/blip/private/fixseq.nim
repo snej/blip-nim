@@ -1,5 +1,7 @@
 # fixseq.nim
 
+import strformat
+
 
 type fixseq*[T] = object
     ## A lightweight fixed-capacity sequence.
@@ -63,27 +65,30 @@ proc spare*[T](s: fixseq[T]): int  = s.cap - s.len  ## How much it can grow (``c
 
 # Item Accessors:
 
-proc normalize[T](s: fixseq[T], index: int): int =
-    rangeCheck index in 0 ..< s.len
-    return index
+when compileOption("rangechecks"):
+  proc checkRange(i: int, range: Slice[int]) =
+    if not (i in range):
+        raise newException(RangeError, &"{i} is not in range {range} for fixseq")
+else:
+  proc checkRange(i: int, range: Slice[int]) {.inline.} = discard
 
-proc normalize[T](s: fixseq[T], index: BackwardsIndex): int =
-    return s.normalize(s.len - int(index))
+proc normalize[T](s: fixseq[T], i: int           ): int {.inline.} = i
+proc normalize[T](s: fixseq[T], i: BackwardsIndex): int {.inline.} = s.normalize(s.len - int(i))
 
 
 proc `[]`*[T](s: fixseq[T], index: int or BackwardsIndex): lent T =
     let index = s.normalize(index)
-    rangeCheck index in 0 ..< s.len
+    checkRange index, 0 ..< s.len
     return s.data[index]
 
 proc `[]`*[T](s: var fixseq[T], index: int or BackwardsIndex): var T =
     let index = s.normalize(index)
-    rangeCheck index in 0 ..< s.len
+    checkRange index, 0 ..< s.len
     return s.data[index]
 
 proc `[]=`*[T](s: var fixseq[T], index: int or BackwardsIndex, value: sink T) =
     let index = s.normalize(index)
-    rangeCheck index in 0 ..< s.len
+    checkRange index, 0 ..< s.len
     s.data[index] = move(value)
 
 
@@ -103,7 +108,8 @@ template toOpenArray*[T](s: fixseq[T]): openarray[T] =
 template toOpenArray*[T](s: fixseq[T]; first, last: int): openarray[T] =
     ## Returns an ``openarray`` on a range of a ``fixseq``, to pass as a parameter.
     # (Note: has to be a template because openarray is magic and can't be returned normally.)
-    rangeCheck first >= 0 and last < s.len
+    checkRange first, 0 ..< s.len
+    checkRange last,  0 ..< s.len
     s.data.toOpenArray(first, last)
 
 proc toSeq*[T](s: fixseq[T]): seq[T] =
@@ -115,7 +121,8 @@ proc toSeq*[T](s: fixseq[T]): seq[T] =
 proc toString*(s: fixseq[byte] | fixseq[char]): string =
     ## Returns a new string copied from a ``fixseq`` of bytes.
     result = newString(s.len)
-    copyMem(addr result[0], unsafeAddr s.data[0], s.len)
+    if s.len > 0:
+        copyMem(addr result[0], unsafeAddr s.data[0], s.len)
 
 
 # Subrange Accessors:
@@ -123,7 +130,7 @@ proc toString*(s: fixseq[byte] | fixseq[char]): string =
 proc normalize[T, S1, S2](s: fixseq[T], range: HSlice[S1, S2]): (int, int) {.inline.} =
     let rstart = s.normalize(range.a)
     let rlen = max(0, s.normalize(range.b) - rstart + 1)
-    rangeCheck rstart >= 0 and rstart + rlen <= s.len
+    checkRange rstart, 0 .. (s.len - rlen)
     return (rstart, rlen)
 
 
@@ -138,7 +145,7 @@ proc `[]`*[T, S1, S2](s: fixseq[T], range: HSlice[S1, S2]): fixseq[T] =
 proc `[]=`*[T, S1, S2](s: var fixseq[T], range: HSlice[S1, S2], values: openarray[T]) =
     ## Replaces a range of items, copying from an array.
     let (rstart, rlen) = s.normalize(range)
-    rangeCheck rlen == values.len
+    checkRange rlen, values.len .. values.len
     var i = rstart
     for item in values:
         s.data[i] = item
@@ -157,7 +164,7 @@ proc moveStart*[T](s: var fixseq[T], delta: int) =
     ## This looks like deleting items from the start, except that it doesn't actually affect the
     ## buffer, so other ``fixseq``s won't see any change.
     ## The start cannot be moved backwards, so a negative ``delta`` causes a range exception.
-    rangeCheck delta in 0 .. s.len
+    checkRange delta, 0 .. s.len
     s.len -= delta
     s.cap -= delta
     s.data = uArrayAt(s.data[delta])
@@ -165,13 +172,13 @@ proc moveStart*[T](s: var fixseq[T], delta: int) =
 proc resize*[T](s: var fixseq[T], size: int) =
     ## Grows or shrinks the ``fixseq`` to the given length.
     ## Throws a range error if the length would exceed the capacity.
-    rangeCheck size in 0 .. s.cap
+    checkRange size, 0 .. s.cap
     s.len = size
 
 proc grow*[T](s: var fixseq[T], by: int) =
     ## Grows or shrinks the ``fixseq`` by a relative amount.
     ## Throws a range error if the length would exceed the capacity.
-    rangeCheck by in 0 .. s.spare
+    checkRange by, 0 .. s.spare
     s.len += by
 
 proc clear*[T](s: var fixseq[T]) =
@@ -196,9 +203,10 @@ proc add*[T](s: var fixseq[T], values: openarray[T]) =
     s[pos ..< s.len] = values
 
 proc add*(s: var fixseq[byte], str: string) =
-    let pos = s.len
-    s.resize(pos + str.len)
-    copyMem(unsafeaddr s.data[pos], unsafeaddr str[0], str.len)
+    if str.len > 0:
+        let pos = s.len
+        s.resize(pos + str.len)
+        copyMem(unsafeaddr s.data[pos], unsafeaddr str[0], str.len)
 
 # Reading (popping):
 
