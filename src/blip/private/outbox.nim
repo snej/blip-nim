@@ -14,22 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import message, protocol
+import protocol
 import asyncdispatch, deques
 
-type Outbox* = object
+type Outbox*[T] = object
     ## Queue of outgoing messages. The Blip connection cycles through the queue, repeatedly
     ## popping the first message, sending the next frame's worth of bytes, and pushing it
     ## back to the end of the queue.
-    queue: Deque[MessageOut]
-    waiting: Future[MessageOut]
+    queue: Deque[T]
+    waiting: Future[T]
     closed: bool
 
-proc empty*(ob: Outbox): bool =
+proc empty*[T](ob: Outbox[T]): bool =
     return ob.queue.len == 0
 
-proc push*(ob: var Outbox, msg: MessageOut) =
-    ## Adds (or returns) a MessageOut to the outbox for processing.
+proc push*[T](ob: var Outbox[T], msg: T) =
+    ## Adds (or returns) a T to the outbox for processing.
     assert not ob.closed
     assert not (msg in ob.queue)
     let waiter = ob.waiting
@@ -46,10 +46,10 @@ proc push*(ob: var Outbox, msg: MessageOut) =
             ob.queue.addLast(msg)
         #TODO: Implement special placement of urgent messages [BLIP 3.2]
 
-proc pop*(ob: var Outbox): Future[MessageOut] =
+proc pop*[T](ob: var Outbox[T]): Future[T] =
     ## Removes and returns the first message. If empty, waits until a message is added.
     ## If closed, returns nil.
-    var f = newFuture[MessageOut]("Outbox.pop")
+    var f = newFuture[T]("Outbox.pop")
     if ob.queue.len > 0:
         f.complete(ob.queue.popFirst())
     elif ob.closed:
@@ -59,14 +59,14 @@ proc pop*(ob: var Outbox): Future[MessageOut] =
         ob.waiting = f
     return f
 
-proc find*(ob: Outbox; msgType: MessageType; msgNo: MessageNo): MessageOut =
+proc find*[T](ob: Outbox[T]; msgType: MessageType; msgNo: MessageNo): T =
     for msg in ob.queue:
         if msg.number == msgNo and msg.messageType == msgType:
             return msg
     return nil
     #OPT: Linear search; could be optimized by keeping a Table, if necessary
 
-proc close*(ob: var Outbox) =
+proc close*[T](ob: var Outbox[T]) =
     ## Marks the Outbox as closed. Nothing more can be added.
     ob.closed = true
     ob.queue.clear()
@@ -76,16 +76,16 @@ proc close*(ob: var Outbox) =
         f.complete(nil)
 
 
-type Icebox* = object
+type Icebox*[T] = object
     ## A set of outgoing messages that are blocked waiting for acknowledgement from the peer.
-    # OPT: Could be optimized by using a Table[(MessageType,MessageNo), MessageOut]
-    messages: seq[MessageOut]
+    # OPT: Could be optimized by using a Table[(MessageType,MessageNo), T]
+    messages: seq[T]
 
-proc add*(ib: var Icebox, msg: MessageOut) =
+proc add*[T](ib: var Icebox[T], msg: T) =
     assert not (msg in ib.messages)
     ib.messages.add(msg)
 
-proc find*(ib: Icebox; msgType: MessageType; msgNo: MessageNo): (int, MessageOut) =
+proc find*[T](ib: Icebox[T]; msgType: MessageType; msgNo: MessageNo): (int, T) =
     for i, msg in ib.messages:
         if msg.number == msgNo and msg.messageType == msgType:
             return (i, msg)

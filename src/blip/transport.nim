@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import protocol, private/[fixseq, log]
+import private/[fixseq, log, protocol]
 import asyncdispatch, asyncnet, asynchttpserver, news, strformat, strtabs, strutils
 
-proc abstract() = raise newException(AssertionError, "Unimplemented abstract method")
+proc abstract() = raise newException(Defect, "Unimplemented abstract method")
 
 type Transport* = ref object of RootObj
     ## Abstract object that can send/receive BLIP frames.

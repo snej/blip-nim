@@ -14,17 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import blip/[message, outbox, protocol, transport]
-import blip/private/[codec, log, fixseq, varint]
+import blip/[message, transport]
+import blip/private/[codec, log, fixseq, outbox, protocol, varint]
 import asyncdispatch, strformat, strmisc, tables
+import deques # transitive dependency of outbox; compiler makes me import it for some reason
 
 export message, transport
 
 type
     Blip* = ref object
         socket: Transport                # The WebSocket
-        outbox: Outbox                   # Messages being sent
-        icebox: Icebox                   # Messages paused until an Ack is received
+        outbox: Outbox[MessageOut]                   # Messages being sent
+        icebox: Icebox[MessageOut]                   # Messages paused until an Ack is received
         outNumber: MessageNo             # Number of latest outgoing message
         inNumber: MessageNo              # Number of latest incoming message
         incomingRequests: MessageMap     # Incoming partial request messages

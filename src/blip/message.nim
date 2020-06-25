@@ -16,7 +16,7 @@
 
 ## BLIP message implementation.
 
-import protocol, private/[codec, log, fixseq, varint]
+import private/[codec, log, fixseq, protocol, varint]
 import asyncdispatch, strformat, strutils
 
 proc messageType(flags: byte): MessageType =
