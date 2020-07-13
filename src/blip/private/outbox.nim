@@ -25,7 +25,7 @@ type Outbox*[T] = object
     waiting: Future[T]
     closed: bool
 
-proc empty*[T](ob: Outbox[T]): bool =
+func empty*[T](ob: Outbox[T]): bool =
     return ob.queue.len == 0
 
 proc push*[T](ob: var Outbox[T], msg: T) =
@@ -59,7 +59,7 @@ proc pop*[T](ob: var Outbox[T]): Future[T] =
         ob.waiting = f
     return f
 
-proc find*[T](ob: Outbox[T]; msgType: MessageType; msgNo: MessageNo): T =
+func find*[T](ob: Outbox[T]; msgType: MessageType; msgNo: MessageNo): T =
     for msg in ob.queue:
         if msg.number == msgNo and msg.messageType == msgType:
             return msg
@@ -85,7 +85,7 @@ proc add*[T](ib: var Icebox[T], msg: T) =
     assert not (msg in ib.messages)
     ib.messages.add(msg)
 
-proc find*[T](ib: Icebox[T]; msgType: MessageType; msgNo: MessageNo): (int, T) =
+func find*[T](ib: Icebox[T]; msgType: MessageType; msgNo: MessageNo): (int, T) =
     for i, msg in ib.messages:
         if msg.number == msgNo and msg.messageType == msgType:
             return (i, msg)

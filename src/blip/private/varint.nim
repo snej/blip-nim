@@ -21,7 +21,7 @@
 
 import fixseq
 
-proc sizeOfVarint*(n: uint64): int =
+func sizeOfVarint*(n: uint64): int =
     ## The number of bytes that a varint representation of ``n`` occupies.
     var len = 1
     var n = n
@@ -49,7 +49,7 @@ proc addVarint*(s: var ByteSeq; n: uint64) =
     let len = putVarint(buf, n)
     s.add(buf.toOpenArray(0, len-1))
 
-proc getVarint*(buf: openarray[byte], pos: var int): uint64 =
+func getVarint*(buf: openarray[byte], pos: var int): uint64 =
     ## Reads a varint from a byte array, returning the decoded number.
     ## On input `pos` is the starting array index to read from; on return, it's just past the end.
     ## Raises a ValueError if the varint is invalid (truncated).
@@ -66,7 +66,7 @@ proc getVarint*(buf: openarray[byte], pos: var int): uint64 =
         shift += 7
     raise newException(ValueError, "Invalid varint")
 
-proc getVarint*(buf: openarray[byte]): uint64 =
+func getVarint*(buf: openarray[byte]): uint64 =
     ## Reads a varint from the start of the array. Ignores any bytes after the varint.
     var pos = 0
     return getVarint(buf, pos)

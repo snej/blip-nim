@@ -97,7 +97,7 @@ test "Grow":
     check s[1] == 2
     check s[4] == 5
 
-    s.resize(50)
+    s.setLen(50)
     check s.len == 50
     check s.cap == 100
     check s.spare == 50

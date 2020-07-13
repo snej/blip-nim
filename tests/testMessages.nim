@@ -16,7 +16,7 @@
 
 import unittest
 
-import blip/message, blip/protocol, blip/private/[codec, log, fixseq]
+import blip/message, blip/private/[codec, log, fixseq, protocol]
 
 let kFrame1 = @['\x01',  # message#
                 '\x40',  # flags

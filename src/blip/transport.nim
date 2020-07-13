@@ -46,7 +46,7 @@ method receive*(t: Transport): Future[fixseq[byte]] {.base, async.} =
 
 # WebSocketTransport
 
-type WebSocketTransport* = ref object of Transport
+type WebSocketTransport* {.requiresInit.} = ref object of Transport
     ## BLIP Transport implementation using a WebSocket
     socket: WebSocket
 

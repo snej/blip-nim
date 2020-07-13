@@ -1,6 +1,6 @@
 # testCodec.nim
 
-import blip/private/[codec, log, fixseq]
+import blip/private/[codec, fixseq]
 import unittest, strformat, strutils
 
 const InputText = """It was a dark and stormy night; the rain fell in torrents, except at

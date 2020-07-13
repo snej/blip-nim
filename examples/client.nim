@@ -24,65 +24,64 @@ when isMainModule:
         echo "Error: ", msg
         quit(1)
 
-    var port = 9001
-    var path = "/"
-    var subprotocol = ""
-    var echoMessages = false
-    var logMessages = true
-    var compressMessages = false
-
-    for kind, key, val in getopt(shortNoVal = {'v'}, longNoVal = @["verbose", "echo", "log"]):
-        case kind
-        of cmdShortOption:
-            case key
-            of "v":         setBLIPLogLevel(4)
-            else:           fail &"Unknown flag '{key}'"
-        of cmdLongOption:
-            case key
-            of "verbose":   setBLIPLogLevel(3)
-            of "port":      port = val.parseInt()
-            of "path":      path = val
-            of "protocol":  subprotocol = val
-            of "log":       logMessages = true
-            of "compress":  compressMessages = true
-            else:           fail &"Unknown flag '{key}'"
-        else:
-            fail("Unsupported parameter '{key}'")
-
-    if path[0] != '/':
-        fail "Path must begin with '/'"
-    echo &"Connecting to server at ws://localhost:{port}{path}"
-
-
-    proc Run(blip: Blip) {.async.} =
-        var n = 0
-        while true:
-            if logMessages or (n mod 1000 == 0):
-                echo "Sending message ", n
-            var msg = blip.newRequest("Test")
-            msg["Testing"] = "123"
-            msg.body = "This is test message #" & $n & ". "
-            for i in countUp(1, 15):
-                msg.body = msg.body & msg.body
-            msg.compressed = compressMessages
-            n += 1
-            let f = msg.send()
-            f.addCallback(proc (response: Future[MessageIn]) =
-                if logMessages:
-                    let body = response.read.body
-                    if body.len < 500:
-                        echo "Got response with body '", response.read.body, "'"
-                    else:
-                        echo "Got response with ", msg.body.len, "-byte body"
-                blip.close()
-            )
-            #await sleepAsync(0)
-            break
-
     proc DoIt() {.async.} =
+        var port = 9001
+        var path = "/"
+        var subprotocol = ""
+        var echoMessages = false
+        var logMessages = true
+        var compressMessages = false
+
+        for kind, key, val in getopt(shortNoVal = {'v'}, longNoVal = @["verbose", "echo", "log"]):
+            case kind
+            of cmdShortOption:
+                case key
+                of "v":         setBLIPLogLevel(4)
+                else:           fail &"Unknown flag '{key}'"
+            of cmdLongOption:
+                case key
+                of "verbose":   setBLIPLogLevel(3)
+                of "port":      port = val.parseInt()
+                of "path":      path = val
+                of "protocol":  subprotocol = val
+                of "log":       logMessages = true
+                of "compress":  compressMessages = true
+                else:           fail &"Unknown flag '{key}'"
+            else:
+                fail("Unsupported parameter '{key}'")
+
+        if path[0] != '/':
+            fail "Path must begin with '/'"
+        echo &"Connecting to server at ws://localhost:{port}{path}"
         var ws = await newWebSocketTransport(&"ws://127.0.0.1:{port}{path}", subprotocol)
         echo "Creating new Blip"
         var blip = newBlip(ws)
+
+        proc Run(blip: Blip) {.async.} =
+            var n = 0
+            while true:
+                if logMessages or (n mod 1000 == 0):
+                    echo "Sending message ", n
+                var msg = blip.newRequest("Test")
+                msg["Testing"] = "123"
+                msg.body = "This is test message #" & $n & ". "
+                for i in countUp(1, 15):
+                    msg.body = msg.body & msg.body
+                msg.compressed = compressMessages
+                n += 1
+                let f = msg.send()
+                f.addCallback(proc (response: Future[MessageIn]) =
+                    if logMessages:
+                        let body = response.read.body
+                        if body.len < 500:
+                            echo "Got response with body '", response.read.body, "'"
+                        else:
+                            echo "Got response with ", msg.body.len, "-byte body"
+                    blip.close()
+                )
+                #await sleepAsync(0)
+                break
+
         await blip.run() and Run(blip)
         echo "...BLIP connection has closed"
 

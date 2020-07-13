@@ -41,7 +41,7 @@ type
         compressed*: bool           ## True to compress message
         noReply*: bool              ## True if no reply should be sent [Requests only]
         properties: string          ## Encoded properties/headers
-        messageType: MessageType    ## Type of message (request/response/error)
+        messageType {.requiresInit.}: MessageType    ## Type of message (request/response/error)
         re: MessageNo               ## If a response, the peer message# it's replying to
         sendProc: SendProc          ## Call this to send the message (points to Blip method)
 
@@ -53,23 +53,23 @@ type
     Message = ref object of RootObj
         ## Base class of incoming or outgoing message objects
         flags: byte             ## BLIP protocol message flags (see protocol.nim)
-        number: MessageNo       ## Message number (sequential in its direction)
+        number {.requiresInit.}: MessageNo       ## Message number (sequential in its direction)
 
-    MessageOut* = ref object of Message
+    MessageOut* {.requiresInit.} = ref object of Message
         ## [INTERNAL ONLY] An outgoing message in the process of being sent.
         data: fixseq[byte]      ## Encoded message data (properties size + properties + body)
         bytesSent: int          ## Number of bytes sent
         unackedBytes: int       ## Number of sent bytes that haven't been ACKed
 
-    MessageIn* = ref object of Message
+    MessageIn* {.requiresInit.} = ref object of Message
         ## An incoming message from the peer, either a request or a response.
         state: MessageInState           ## Tracks what's been received so far
         propertyBuf: seq[byte]          ## Encoded properties
-        body: seq[byte]                 ## Body
+        body: string                    ## Body
         rawBytesReceived: int           ## Total number of raw frame bytes received
         unackedBytes: int               ## Number of bytes received but not ACKed
         propertiesRemaining: int        ## Number of bytes of properties not yet received
-        replyProc: SendProc             ## Function that will send a reply (points to Blip method)
+        replyProc {.requiresInit.}: SendProc             ## Function that will send a reply (points to Blip method)
         completionFuture: Future[MessageIn]
 
     MessageInState = enum
@@ -87,7 +87,7 @@ type
 
 proc newMessage*(sendProc: SendProc): MessageBuf =
     # [INTERNAL ONLY] Creates a new message you can add properties and/or a body to.
-    return MessageBuf(sendProc: sendProc)
+    return MessageBuf(messageType: kRequestType, sendProc: sendProc)
 
 proc `[]=`*(buf: var MessageBuf, key: string, val: string) =
     ## Adds a property key/value to a message.
@@ -308,7 +308,7 @@ proc addFrame*(msg: MessageIn;
             msg.flags = withMessageType(msg.flags, kErrorType)
             msg.state = Start
             msg.propertyBuf = @[]
-            msg.body = @[]
+            msg.body = ""
         else:
             raise newException(BlipException, "Frame has inconsistent message type")
 
@@ -335,7 +335,7 @@ proc addFrame*(msg: MessageIn;
             if msg.propertiesRemaining == 0:
                 msg.state = ReadingBody
         if msg.state == ReadingBody:
-            msg.body.add(decoded[pos .. ^1].toOpenArray)
+            msg.body.add(decoded[pos .. ^1])
 
     if (flags and kMoreComing) == 0:
         # End of message!
@@ -369,6 +369,6 @@ proc cancel*(msg: MessageIn; errDomain = BLIPErrorDomain, errCode = 502, errMsg 
         msg.flags = withMessageType(msg.flags, kErrorType)
         msg.state = Complete
         msg.propertyBuf = cast[seq[byte]](buf.properties)
-        msg.body = cast[seq[byte]](buf.body)
+        msg.body = buf.body
         # Now deliver to the Future's observer:
         f.complete(msg)

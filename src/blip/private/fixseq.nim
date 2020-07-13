@@ -15,18 +15,16 @@ type fixseq*[T] = object
 #TODO: Optimize to allocate memory myself rather than using a `seq` (requires gc=arc?)
 
 
-proc uArrayAt[T](item: var T): ptr UncheckedArray[T] {.inline.} =
+func uArrayAt[T](item: var T): ptr UncheckedArray[T] {.inline.} =
     cast[ptr UncheckedArray[T]](unsafeaddr item)
 
 
 # Creation:
 
 proc make[T](owner: sink seq[T], len: int, cap: int): fixseq[T] =
-    result.owner = owner
+    result = fixseq[T](owner: owner, len: len, cap: cap)
     shallow(result.owner)
     result.data = uArrayAt(result.owner[0])
-    result.len = len
-    result.cap = cap
 
 
 proc newFixseq*[T](len: int): fixseq[T] =
@@ -56,11 +54,11 @@ proc toFixseq*(str: string): fixseq[byte] =
 
 # Accessors:
 
-proc len*[T](s: fixseq[T]): int  = s.len            ## The current length.
-proc high*[T](s: fixseq[T]): int = s.len - 1        ## The maximum index (``len - 1``)
-proc low*[T](s: fixseq[T]): int  = 0                ## The minimum index (``0``)
-proc cap*[T](s: fixseq[T]): int  = s.cap            ## The maximum the length can grow to
-proc spare*[T](s: fixseq[T]): int  = s.cap - s.len  ## How much it can grow (``cap - len``)
+func len*[T](s: fixseq[T]): int  = s.len            ## The current length.
+func high*[T](s: fixseq[T]): int = s.len - 1        ## The maximum index (``len - 1``)
+func low*[T](s: fixseq[T]): int  = 0                ## The minimum index (``0``)
+func cap*[T](s: fixseq[T]): int  = s.cap            ## The maximum the length can grow to
+func spare*[T](s: fixseq[T]): int  = s.cap - s.len  ## How much it can grow (``cap - len``)
 
 
 # Item Accessors:
@@ -72,16 +70,16 @@ when compileOption("rangechecks"):
 else:
   proc checkRange(i: int, range: Slice[int]) {.inline.} = discard
 
-proc normalize[T](s: fixseq[T], i: int           ): int {.inline.} = i
-proc normalize[T](s: fixseq[T], i: BackwardsIndex): int {.inline.} = s.normalize(s.len - int(i))
+func normalize[T](s: fixseq[T], i: int           ): int {.inline.} = i
+func normalize[T](s: fixseq[T], i: BackwardsIndex): int {.inline.} = s.normalize(s.len - int(i))
 
 
-proc `[]`*[T](s: fixseq[T], index: int or BackwardsIndex): lent T =
+func `[]`*[T](s: fixseq[T], index: int or BackwardsIndex): lent T =
     let index = s.normalize(index)
     checkRange index, 0 ..< s.len
     return s.data[index]
 
-proc `[]`*[T](s: var fixseq[T], index: int or BackwardsIndex): var T =
+func `[]`*[T](s: var fixseq[T], index: int or BackwardsIndex): var T =
     let index = s.normalize(index)
     checkRange index, 0 ..< s.len
     return s.data[index]
@@ -124,17 +122,16 @@ proc toString*(s: fixseq[byte] | fixseq[char]): string =
     if s.len > 0:
         copyMem(addr result[0], unsafeAddr s.data[0], s.len)
 
-
 # Subrange Accessors:
 
-proc normalize[T, S1, S2](s: fixseq[T], range: HSlice[S1, S2]): (int, int) {.inline.} =
+func normalize[T, S1, S2](s: fixseq[T], range: HSlice[S1, S2]): (int, int) {.inline.} =
     let rstart = s.normalize(range.a)
     let rlen = max(0, s.normalize(range.b) - rstart + 1)
     checkRange rstart, 0 .. (s.len - rlen)
     return (rstart, rlen)
 
 
-proc `[]`*[T, S1, S2](s: fixseq[T], range: HSlice[S1, S2]): fixseq[T] =
+func `[]`*[T, S1, S2](s: fixseq[T], range: HSlice[S1, S2]): fixseq[T] =
     ## Returns a new ``fixseq`` on a subrange of the buffer.
     ## The new object has capacity limited to its length, i.e. it cannot be grown.
     ## This ensures it cannot be used to access memory outside the range it was given.
@@ -169,7 +166,7 @@ proc moveStart*[T](s: var fixseq[T], delta: int) =
     s.cap -= delta
     s.data = uArrayAt(s.data[delta])
 
-proc resize*[T](s: var fixseq[T], size: int) =
+proc setLen*[T](s: var fixseq[T], size: int) =
     ## Grows or shrinks the ``fixseq`` to the given length.
     ## Throws a range error if the length would exceed the capacity.
     checkRange size, 0 .. s.cap
@@ -192,25 +189,25 @@ proc add*[T](s: var fixseq[T], value: sink T) =
     ## Appends a value.
     ## Throws a range error if the length is already equal to the capacity.
     let pos = s.len
-    s.resize(pos + 1)
+    s.setLen(pos + 1)
     s.data[pos] = value
 
 proc add*[T](s: var fixseq[T], values: openarray[T]) =
     ## Appends an array of values.
     ## Throws a range error if the length would exceed the capacity.
     let pos = s.len
-    s.resize(pos + values.len)
+    s.setLen(pos + values.len)
     s[pos ..< s.len] = values
 
 proc add*(s: var fixseq[byte], str: string) =
     if str.len > 0:
         let pos = s.len
-        s.resize(pos + str.len)
+        s.setLen(pos + str.len)
         copyMem(unsafeaddr s.data[pos], unsafeaddr str[0], str.len)
 
 # Reading (popping):
 
-proc readFirst[T](s: var fixseq[T]): T =
+proc readFirst*[T](s: var fixseq[T]): T =
     result = s[0]
     s.moveStart(1)
 
@@ -218,3 +215,11 @@ proc read*[T](s: var fixseq[T], n: int): fixseq[T] =
     result = s[0 ..< n]
     s.moveStart(n)
 
+
+# String-specific utilities:
+
+proc add*(str: var string, s: fixseq[byte]) =
+    if s.len > 0:
+        let pos = str.len
+        str.setLen(pos + s.len)
+        copyMem(unsafeaddr str[pos], unsafeaddr s[0], s.len)

@@ -52,6 +52,6 @@ proc `+`*(n: MessageNo, i: int): MessageNo = MessageNo(int64(n) + i)
 proc `++`*(n: var MessageNo): MessageNo {.discardable.} =
     n = n + 1
     return n
-proc `==`*(n: MessageNo, m: MessageNo): bool = uint64(n) == uint64(m)
-proc `<`* (n: MessageNo, m: MessageNo): bool = uint64(n) <  uint64(m)
-proc `<=`*(n: MessageNo, m: MessageNo): bool = uint64(n) <= uint64(m)
+proc `==`*(n: MessageNo, m: MessageNo): bool {.borrow.}
+proc `<`* (n: MessageNo, m: MessageNo): bool {.borrow.}
+proc `<=`*(n: MessageNo, m: MessageNo): bool {.borrow.}

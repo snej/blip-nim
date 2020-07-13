@@ -22,8 +22,8 @@ import deques # transitive dependency of outbox; compiler makes me import it for
 export message, transport
 
 type
-    Blip* = ref object
-        socket: Transport                # The WebSocket
+    BlipObj = object
+        socket {.requiresInit.}: Transport                # The WebSocket
         outbox: Outbox[MessageOut]                   # Messages being sent
         icebox: Icebox[MessageOut]                   # Messages paused until an Ack is received
         outNumber: MessageNo             # Number of latest outgoing message
@@ -36,6 +36,8 @@ type
         inCodec: Inflater                # Decompresses incoming frames
         defaultHandler: Handler          # Default callback to handle incoming requests
         handlers: Table[string, Handler] # Callbacks for requests with specific "Profile"s
+
+    Blip* = ref BlipObj
 
     MessageMap = Table[MessageNo, MessageIn]
 
@@ -103,26 +105,29 @@ proc newRequest*(blip: Blip, profile: string = ""): MessageBuf =
 proc sendLoop(blip: Blip) {.async.} =
     ## Async loop that processes messages in the outbox and sends them as WebSocket messages,
     ## until the connection is closed.
-    while blip.socket.canSend:
-        let msg = await blip.outbox.pop()
-        if msg == nil:
-            return
-        let frameSize = if (msg.priority == Urgent or blip.outbox.empty): 32768 else: 4096
-        var buffer = blip.outBuffer[0 ..< frameSize]
-        buffer.clear()
-        msg.nextFrame(buffer, blip.outCodec)
-        if not msg.finished:
-            if msg.needsAck:
-                log Info, "Freezing {msg} until acked"
-                blip.icebox.add(msg)
-            else:
-                blip.outbox.push(msg)
+    try:
+        while blip.socket.canSend:
+            let msg = await blip.outbox.pop()
+            if msg == nil:
+                return
+            let frameSize = if (msg.priority == Urgent or blip.outbox.empty): 32768 else: 4096
+            var buffer = blip.outBuffer[0 ..< frameSize]
+            buffer.clear()
+            msg.nextFrame(buffer, blip.outCodec)
+            if not msg.finished:
+                if msg.needsAck:
+                    log Info, "Freezing {msg} until acked"
+                    blip.icebox.add(msg)
+                else:
+                    blip.outbox.push(msg)
 
-        let f = blip.socket.send(buffer)
-        yield f
-        if f.failed:
-            logException f.error, "sending frame"
-            break
+            let f = blip.socket.send(buffer)
+            yield f
+            if f.failed:
+                logException f.error, "sending frame"
+                break
+    except Exception as x:
+        logException x, "in sendLoop"
     log Debug, "sendLoop is done"
 
 

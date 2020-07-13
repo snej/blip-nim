@@ -41,8 +41,6 @@ type
 
 const DefaultMode* = Mode.SyncFlush
 
-proc initCodec(c: Codec) =
-    c.checksum.reset()
 
 method write*(c: Codec;
               input: var fixseq[byte];
@@ -94,7 +92,7 @@ proc writeRaw(c: Codec; input: var fixseq[byte]; output: var fixseq[byte], maxBy
 type
     ZlibCodec* = ref object of Codec
         z: ZStream
-        flateProc: proc(strm: var ZStream, flush: int32): int32 {.cdecl.}
+        flateProc {.requiresInit.}: proc(strm: var ZStream, flush: int32): int32 {.cdecl.}
 
     DeflaterObj = object of ZlibCodec
     Deflater* = ref DeflaterObj
@@ -139,16 +137,16 @@ proc zwrite(c: ZlibCodec;
     assert outSpare > 0
     c.z.availOut = Uint(outSpare)
     let outLen = output.len
-    output.resize(output.cap)
+    output.setLen(output.cap)
     c.z.nextOut = cast[Pbytef](unsafeAddr output[outLen])
     let err = c.flateProc(c.z, int32(mode))
     if err != 0:
         log Debug, "    {operation}(in[0..{inSize-1}], out[0..{outSpare-1}], mode {mode})-> err {err}"
-        output.resize(outLen)
+        output.setLen(outLen)
         c.check(err)
     if input.len > 0:
         input.moveStart(input.indexOfPtr(c.z.nextIn))
-    output.resize(output.indexOfPtr(c.z.nextOut))
+    output.setLen(output.indexOfPtr(c.z.nextOut))
     log Debug, "    {operation}(in[0..{inSize-1}], out[0..{outSpare-1}], mode {mode})-> {output.len - outLen} bytes"
 
 
@@ -158,9 +156,7 @@ proc `=destroy`*(c: var DeflaterObj) =
     discard deflateEnd(c.z)
 
 proc newDeflater*(level: CompressionLevel = DefaultCompression): Deflater =
-    result = Deflater()
-    initCodec(result)
-    result.flateProc = zlib.deflate
+    result = Deflater(flateProc: zlib.deflate)
     result.check(deflateInit2u(result.z, level.int32, Z_DEFLATED.int32,
                  -ZlibWindowSize.int32, ZlibDeflateMemLevel.int32, Z_DEFAULT_STRATEGY.int32,
                  "1.2.11", sizeof(ZStream).cint))
@@ -215,7 +211,7 @@ method write*(c: Deflater;
         # measure, overwrite them with the checksum. (The Inflater will restore them.)
         let trailer = output[^CRC32Size .. ^1]
         assert trailer[0] == 0 and trailer[1] == 0 and trailer[2] == 0xFF and trailer[3] == 0xFF
-        output.resize(output.len - CRC32Size)
+        output.setLen(output.len - CRC32Size)
         c.writeChecksum(output)
     log Debug, "    compressed {inputConsumed} bytes to {outputWritten} ({c.unflushedBytes} unflushed)"
 
@@ -234,9 +230,7 @@ proc `=destroy`*(c: var InflaterObj) =
     discard inflateEnd(c.z)
 
 proc newInflater*(): Inflater =
-    result = Inflater()
-    initCodec(result)
-    result.flateProc = zlib.inflate
+    result = Inflater(flateProc: zlib.inflate)
     result.check(inflateInit2(result.z, -ZlibWindowSize))
 
 let kTrailer = @[0x00'u8, 0x00, 0xFF, 0xFF].toFixseq
@@ -262,7 +256,7 @@ method write*(c: Inflater;
         log Debug, "    decompressed to {output.len - output.len} bytes"
 
     let bytesWritten = output.len - origOutput.len
-    output.resize(bytesWritten)
+    output.setLen(bytesWritten)
     c.checksum += output[origOutput.len ..< output.len].toOpenArray
     if input.len <= CRC32Size:
         c.readAndVerifyChecksum(input)
