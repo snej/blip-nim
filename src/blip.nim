@@ -23,35 +23,37 @@ export message, transport
 
 type
     BlipObj = object
-        socket {.requiresInit.}: Transport                # The WebSocket
-        outbox: Outbox[MessageOut]                   # Messages being sent
-        icebox: Icebox[MessageOut]                   # Messages paused until an Ack is received
-        outNumber: MessageNo             # Number of latest outgoing message
-        inNumber: MessageNo              # Number of latest incoming message
-        incomingRequests: MessageMap     # Incoming partial request messages
-        incomingResponses: MessageMap    # Incoming partial response messages
-        outBuffer: fixseq[byte]          # Reuseable buffer for outgoing frames
-        inBuffer: fixseq[byte]           # Reuseable buffer for incoming frames
-        outCodec: Deflater               # Compresses outgoing frames
-        inCodec: Inflater                # Decompresses incoming frames
-        defaultHandler: Handler          # Default callback to handle incoming requests
-        handlers: Table[string, Handler] # Callbacks for requests with specific "Profile"s
+        socket {.requiresInit.}: Transport  # The WebSocket
+        outbox: Outbox[MessageOut]          # Messages being sent
+        icebox: Icebox[MessageOut]          # Messages paused until an Ack is received
+        outNumber: MessageNo                # Number of latest outgoing message
+        inNumber: MessageNo                 # Number of latest incoming message
+        incomingRequests: MessageMap        # Incoming partial request messages
+        incomingResponses: MessageMap       # Incoming partial response messages
+        outBuffer: fixseq[byte]             # Reuseable buffer for outgoing frames
+        inBuffer: fixseq[byte]              # Reuseable buffer for incoming frames
+        outCodec: Deflater                  # Compresses outgoing frames
+        inCodec: Inflater                   # Decompresses incoming frames
+        defaultHandler: Handler             # Default callback to handle incoming requests
+        handlers: Table[string, Handler]    # Callbacks for requests with specific "Profile"s
 
     Blip* = ref BlipObj
+        ## A BLIP connection.
 
     MessageMap = Table[MessageNo, MessageIn]
 
     Handler* = proc(msg: MessageIn) {.gcsafe.}
+        ## A callback to handle an incoming BLIP request.
 
 proc setBLIPLogLevel*(level: int) =
     ## Sets the level of logging: 0 is errors only, 1 includes warnings, 2 info, 3 verbose, 4 debug
     CurrentLogLevel = LogLevel(level)
 
-proc newBlip*(socket: Transport): Blip =
+proc newBlip*(socket: Transport, compressionLevel: int = -1): Blip =
     ## Creates a new Blip object from a WebSocket. You still need to call ``run`` on it.
     assert socket != nil
     result = Blip(socket: socket)
-    result.outCodec = newDeflater()
+    result.outCodec = newDeflater(CompressionLevel(compressionLevel))
     result.inCodec = newInflater()
     result.outBuffer = newFixseq[byte](32768)
     result.inBuffer = newFixseqOfCap[byte](32768)
@@ -77,6 +79,8 @@ proc sendRequestProc(blip: Blip): SendProc =
     # Returns a proc that will send a MessageOut as a request
     return proc(msg: sink MessageOut): Future[MessageIn] =
         assert msg.messageType == kRequestType
+        if blip.outCodec.compressionLevel == NoCompression:
+            msg.noCompression()
         let msgNo = ++blip.outNumber
         msg.number = msgNo
         blip.outbox.push(msg)
@@ -92,6 +96,8 @@ proc sendResponseProc(blip: Blip): SendProc =
     return proc(msg: sink MessageOut): Future[MessageIn] =
         assert msg.messageType != kRequestType
         assert(msg.number != MessageNo(0))
+        if blip.outCodec.compressionLevel == NoCompression:
+            msg.noCompression()
         blip.outbox.push(msg)
         return nil
 
@@ -106,6 +112,7 @@ proc sendLoop(blip: Blip) {.async.} =
     ## Async loop that processes messages in the outbox and sends them as WebSocket messages,
     ## until the connection is closed.
     try:
+        var pending: Deque[Future[void]]
         while blip.socket.canSend:
             let msg = await blip.outbox.pop()
             if msg == nil:

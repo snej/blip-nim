@@ -34,4 +34,4 @@ template log*(level: LogLevel, message: typed) =
 
 template logException*(e: ref Exception, message: typed) =
     if Error <= CurrentLogLevel:
-        echo "BLIP Error: Caught ", e.name, " '", e.msg.partition("\L")[0], "' ", &message
+        echo "BLIP Error: Caught ", e.name, " '", strmisc.partition(e.msg, "\L")[0], "' ", &message

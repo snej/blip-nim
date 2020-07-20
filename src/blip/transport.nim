@@ -49,6 +49,13 @@ method receive*(t: Transport): Future[fixseq[byte]] {.base, async.} =
 type WebSocketTransport* {.requiresInit.} = ref object of Transport
     ## BLIP Transport implementation using a WebSocket
     socket: WebSocket
+    sendingBytes: int64
+    sendWaiter: Future[void]
+    sendError: ref Exception
+
+const kMaxSendingBytes = 65536
+    ## Max number of bytes written to the socket that haven't been acknowledged yet
+    ## (by the WebSocket's send future completing.)
 
 proc newWebSocketTransport*(socket: WebSocket): WebSocketTransport =
     ## Wraps a Transport around an existing WebSocket object.
@@ -92,13 +99,43 @@ method canSend*(t: WebSocketTransport): bool =
 method canReceive*(t: WebSocketTransport): bool =
     return t.socket.readyState == Open or t.socket.readyState == Closing
 
-method send*(t: WebSocketTransport; frame: fixseq[byte]) {.async.} =
-    let f = t.socket.send(frame.toString, Opcode.Binary)
-    yield f
-    if f.failed and f.error.name == "WebSocketClosedError" and t.socket.readyState >= Closing:
-        log Verbose, "Transport closed cleanly"
+method send*(t: WebSocketTransport; frame: fixseq[byte]): Future[void] =
+    result = newFuture[void]("WebSocketTransport.send")
+
+    if t.sendError != nil:
+        result.fail(t.sendError)
+        return
+
+    let byteCount = frame.len
+    t.sendingBytes += byteCount
+
+    log Debug, "Transport sending {byteCount} bytes"
+    t.socket.send(frame.toString, Opcode.Binary).addCallback proc(f: Future[void]) =
+        # Callback when frame has been sent: decrement sendingBytes and maybe complete a Future
+        if not f.failed:
+            t.sendingBytes -= byteCount
+            let waiter = t.sendWaiter
+            if t.sendingBytes < kMaxSendingBytes and waiter != nil:
+                log Verbose, "Transport is un-blocking (sendingBytes={t.sendingBytes})"
+                t.sendWaiter = nil
+                waiter.complete()
+        else:
+            if f.error.name == "WebSocketClosedError" and t.socket.readyState >= Closing:
+                log Verbose, "Transport closed cleanly"
+            else:
+                logException f.error, "Transport send"
+            if t.sendError == nil:
+                t.sendError = f.error
+            if t.sendWaiter != nil:
+                t.sendWaiter.fail(f.error)
+
+    if t.sendingBytes < kMaxSendingBytes:
+        result.complete()
     else:
-        await f
+        assert t.sendWaiter == nil
+        t.sendWaiter = result
+        log Verbose, "Transport is blocking (sendingBytes={t.sendingBytes})"
+
 
 method receive*(t: WebSocketTransport): Future[fixseq[byte]] {.async.} =
     while t.socket.readyState == Open:
@@ -106,6 +143,8 @@ method receive*(t: WebSocketTransport): Future[fixseq[byte]] {.async.} =
         case packet.kind
             of Binary:
                 return packet.data.toFixseq
+            of Ping:
+                discard
             of Close:
                 break
             else:

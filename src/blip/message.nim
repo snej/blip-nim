@@ -133,7 +133,7 @@ proc newMessageOut*(buf: sink MessageBuf): MessageOut =
         flags = flags or kUrgent
     if buf.compressed:
         flags = flags or kCompressed
-    if buf.noReply:
+    if buf.noReply and buf.messageType == kRequestType:
         flags = flags or kNoReply
     # Encode the message into a byte sequence:
     var data = newFixseqOfCap[byte](9 + buf.properties.len + buf.body.len)
@@ -150,6 +150,10 @@ proc newAckMessage*(msg: MessageIn, bytesReceived: int): MessageOut =
     body.addVarint(uint64(bytesReceived))
     buf.body = cast[string](body)
     return newMessageOut(buf)
+
+proc noCompression*(msg: MessageOut) =
+    # [INTERNAL ONLY]
+    msg.flags = msg.flags and not kCompressed
 
 proc finished*(msg: MessageOut): bool =
     return msg.data.len == 0
@@ -290,6 +294,24 @@ proc replyWithError*(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorM
     ## Sends an error response to this message.
     msg.createErrorResponse(domain, code, errorMessage).sendNoReply()
 
+proc addBytes(msg: MessageIn, decoded: fixseq[byte]) =
+    var pos = 0;
+    if msg.state == Start:
+        # First frame. This one starts with the properties' length, and (some or all) properties.
+        msg.propertiesRemaining = int(getVarint(decoded.toOpenArray, pos))
+        msg.propertyBuf = newSeqOfCap[byte](min(msg.propertiesRemaining, 4096))
+        msg.state = ReadingProperties
+    if msg.state == ReadingProperties:
+        # There are still bytes of properties left to read:
+        let newPos = min(pos + msg.propertiesRemaining, decoded.len)
+        msg.propertyBuf.add(decoded[pos ..< newPos].toOpenArray)
+        msg.propertiesRemaining -= (newPos - pos)
+        pos = newPos
+        if msg.propertiesRemaining == 0:
+            msg.state = ReadingBody
+    if msg.state == ReadingBody:
+        msg.body.add(decoded[pos .. ^1])
+
 proc addFrame*(msg: MessageIn;
                flags: byte;
                frame: fixseq[byte];
@@ -312,30 +334,15 @@ proc addFrame*(msg: MessageIn;
         else:
             raise newException(BlipException, "Frame has inconsistent message type")
 
-    let codecMode = if (flags and kCompressed) != 0: DefaultMode else: Raw
-
-    var inputRemaining = frame
-    while inputRemaining.len > 0:
-        log Verbose, "    processing {inputRemaining.len} bytes..."
-        var decoded = buffer
-        codec.write(inputRemaining, decoded, codecMode)
-        var pos = 0;
-
-        if msg.state == Start:
-            # First frame. This one starts with the properties length, and (some or all) properties.
-            msg.propertiesRemaining = int(getVarint(decoded.toOpenArray, pos))
-            msg.propertyBuf = newSeqOfCap[byte](min(msg.propertiesRemaining, 4096))
-            msg.state = ReadingProperties
-        if msg.state == ReadingProperties:
-            # There are still bytes of properties left to read:
-            let newPos = min(pos + msg.propertiesRemaining, decoded.len)
-            msg.propertyBuf.add(decoded[pos ..< newPos].toOpenArray)
-            msg.propertiesRemaining -= (newPos - pos)
-            pos = newPos
-            if msg.propertiesRemaining == 0:
-                msg.state = ReadingBody
-        if msg.state == ReadingBody:
-            msg.body.add(decoded[pos .. ^1])
+    if (flags and kCompressed) != 0:
+        var inputRemaining = frame
+        while inputRemaining.len > 0:
+            log Verbose, "    processing {inputRemaining.len} bytes..."
+            var decoded = buffer
+            codec.write(inputRemaining, decoded, DefaultMode)
+            msg.addBytes(decoded)
+    else:
+        msg.addBytes(codec.decodeRaw(frame))
 
     if (flags and kMoreComing) == 0:
         # End of message!
@@ -365,9 +372,9 @@ proc cancel*(msg: MessageIn; errDomain = BLIPErrorDomain, errCode = 502, errMsg 
     let f = msg.completionFuture
     if f != nil:
         # Make myself an error response:
+        msg.state = Complete
         var buf = msg.createErrorResponse(errDomain, errCode, errMsg)
         msg.flags = withMessageType(msg.flags, kErrorType)
-        msg.state = Complete
         msg.propertyBuf = cast[seq[byte]](buf.properties)
         msg.body = buf.body
         # Now deliver to the Future's observer:

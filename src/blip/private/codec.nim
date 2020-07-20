@@ -77,6 +77,15 @@ proc readAndVerifyChecksum*(c: Codec; input: var fixseq[byte]) =
         raise newException(CodecException, &"Invalid checksum {inputChecksum:x}: should be {c.checksum.result:x}")
     input.moveStart(CRC32Size)
 
+proc decodeRaw*(c: Codec, input: fixseq[byte]): fixseq[byte] =
+    if input.len < CRC32Size:
+        raise newException(CodecException, &"Missing checksum")
+    var data = input[0 ..< ^CRC32Size]
+    var checksum = input[^CRC32Size .. ^1]
+    c.checksum += data.toOpenArray
+    c.readAndVerifyChecksum(checksum)
+    return data
+
 proc writeRaw(c: Codec; input: var fixseq[byte]; output: var fixseq[byte], maxBytes: int) =
     ## Uncompressed write
     let n = min(min(input.len, output.spare), maxBytes)
@@ -95,6 +104,8 @@ type
         flateProc {.requiresInit.}: proc(strm: var ZStream, flush: int32): int32 {.cdecl.}
 
     DeflaterObj = object of ZlibCodec
+        compressionLevel: CompressionLevel
+
     Deflater* = ref DeflaterObj
 
     InflaterObj = object of ZlibCodec
@@ -155,11 +166,18 @@ proc zwrite(c: ZlibCodec;
 proc `=destroy`*(c: var DeflaterObj) =
     discard deflateEnd(c.z)
 
-proc newDeflater*(level: CompressionLevel = DefaultCompression): Deflater =
-    result = Deflater(flateProc: zlib.deflate)
-    result.check(deflateInit2u(result.z, level.int32, Z_DEFLATED.int32,
-                 -ZlibWindowSize.int32, ZlibDeflateMemLevel.int32, Z_DEFAULT_STRATEGY.int32,
-                 "1.2.11", sizeof(ZStream).cint))
+proc newDeflater*(compressionLevel: CompressionLevel = DefaultCompression): Deflater =
+    result = Deflater(flateProc: zlib.deflate, compressionLevel: compressionLevel)
+    result.check(deflateInit2u(result.z,
+                               compressionLevel.int32,
+                               Z_DEFLATED.int32,
+                               -ZlibWindowSize.int32,
+                               ZlibDeflateMemLevel.int32,
+                               Z_DEFAULT_STRATEGY.int32,
+                               "1.2.11",
+                               sizeof(ZStream).cint))
+
+proc compressionLevel*(c: Deflater): CompressionLevel = c.compressionLevel
 
 proc writeAndFlush(c: Deflater;
               input: var fixseq[byte];
