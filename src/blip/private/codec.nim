@@ -23,7 +23,8 @@ import endians, strformat, zip/zlib
 
 type
     Codec* = ref object of RootObj
-        ## Abstract base class
+        ## An abstract class whose instances transform data from one form to another.
+        ## Superclass of ZLibCodec, whose subclasses are Inflater and Deflater.
         checksum: CRC32Accumulator
 
     Mode* = enum

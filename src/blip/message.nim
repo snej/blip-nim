@@ -266,7 +266,6 @@ proc body*(msg: MessageIn): string =
     return cast[string](msg.body)
 
 proc newResponseBuf(msg: MessageIn, messageType: MessageType): MessageBuf =
-    assert msg.replyProc != nil
     MessageBuf(messageType: messageType, priority: msg.priority, noReply: true, re: msg.number,
                sendProc: msg.replyProc)
 
@@ -276,19 +275,24 @@ proc createResponse*(msg: MessageIn): MessageBuf =
     assert msg.finished
     assert msg.messageType == kRequestType
     assert not msg.noReply
+    assert msg.replyProc != nil
     return newResponseBuf(msg, kResponseType)
 
-proc createErrorResponse*(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorMessage: string): MessageBuf =
-    ## Returns a new MessageBuf for an error response.
-    ## Once you've set the properties and body, call ``send`` on it.
-    assert msg.finished
-    assert msg.messageType == kRequestType
+proc createErrorResponseInternal(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorMessage: string): MessageBuf =
     assert not msg.noReply
     result = newResponseBuf(msg, kErrorType)
     result[ErrorCodeProperty] = $code
     if domain != BLIPErrorDomain:
         result[ErrorDomainProperty] = domain
     result.body = errorMessage
+
+proc createErrorResponse*(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorMessage: string): MessageBuf =
+    ## Returns a new MessageBuf for an error response.
+    ## Once you've set the properties and body, call ``send`` on it.
+    assert msg.finished
+    assert msg.messageType == kRequestType
+    assert msg.replyProc != nil
+    return msg.createErrorResponseInternal(domain, code, errorMessage)
 
 proc replyWithError*(msg: MessageIn; domain = BLIPErrorDomain; code: int; errorMessage: string) =
     ## Sends an error response to this message.
@@ -369,13 +373,12 @@ proc createCompletionFuture*(msg: MessageIn): Future[MessageIn] =
 proc cancel*(msg: MessageIn; errDomain = BLIPErrorDomain, errCode = 502, errMsg = "Disconnected") =
     # [INTERNAL ONLY] Notify client of an error receiving a response, usually because the
     # socket was disconnected before the response arrived.
-    let f = msg.completionFuture
-    if f != nil:
-        # Make myself an error response:
+    if msg.messageType == kResponseType and msg.completionFuture != nil:
+        # Make an error response:
         msg.state = Complete
-        var buf = msg.createErrorResponse(errDomain, errCode, errMsg)
+        var buf = msg.createErrorResponseInternal(errDomain, errCode, errMsg)
         msg.flags = withMessageType(msg.flags, kErrorType)
         msg.propertyBuf = cast[seq[byte]](buf.properties)
         msg.body = buf.body
         # Now deliver to the Future's observer:
-        f.complete(msg)
+        msg.completionFuture.complete(msg)

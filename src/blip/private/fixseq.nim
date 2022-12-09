@@ -5,14 +5,13 @@ import strformat
 
 type fixseq*[T] = object
     ## A lightweight fixed-capacity sequence.
-    ## Multiple fixseqs can share the same data buffer, so the subrange ``..`` operator is
-    ## very lightweight.
+    ## Multiple fixseqs can share the same data buffer, so creating a subrange is very lightweight.
     owner: seq[T]                   # Sequence that owns the data
     data:  ptr UncheckedArray[T]    # Pointer to first item
     len:   int                      # Current number of items
     cap:   int                      # Max capacity
 
-#TODO: Optimize to allocate memory myself rather than using a `seq` (requires gc=arc?)
+#TODO: Optimize to allocate memory myself rather than using a `seq` (requires --gc:arc?)
 
 
 func uArrayAt[T](item: var T): ptr UncheckedArray[T] {.inline.} =
@@ -66,7 +65,7 @@ func spare*[T](s: fixseq[T]): int  = s.cap - s.len  ## How much it can grow (``c
 when compileOption("rangechecks"):
   proc checkRange(i: int, range: Slice[int]) =
     if not (i in range):
-        raise newException(RangeError, &"{i} is not in range {range} for fixseq")
+        raise newException(RangeDefect, &"{i} is not in range {range} for fixseq")
 else:
   proc checkRange(i: int, range: Slice[int]) {.inline.} = discard
 

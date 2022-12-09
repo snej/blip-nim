@@ -110,7 +110,7 @@ method send*(t: WebSocketTransport; frame: fixseq[byte]): Future[void] =
     t.sendingBytes += byteCount
 
     log Debug, "Transport sending {byteCount} bytes"
-    t.socket.send(frame.toString, Opcode.Binary).addCallback proc(f: Future[void]) =
+    t.socket.send(frame.toSeq, Opcode.Binary).addCallback proc(f: Future[void]) =
         # Callback when frame has been sent: decrement sendingBytes and maybe complete a Future
         if not f.failed:
             t.sendingBytes -= byteCount
