@@ -16,6 +16,7 @@
 
 import private/[fixseq, log, protocol]
 import asyncdispatch, asyncnet, asynchttpserver, news, strformat, strtabs, strutils
+import std/monotimes, std/times
 
 proc abstract() = raise newException(Defect, "Unimplemented abstract method")
 
@@ -52,14 +53,23 @@ type WebSocketTransport* {.requiresInit.} = ref object of Transport
     sendingBytes: int64
     sendWaiter: Future[void]
     sendError: ref Exception
+    # Metrics:
+    bytesSent: uint64
+    bytesRcvd: uint64
+    startTime: MonoTime
+    sendWaitStarted: MonoTime
+    totalSendWaitTime: Duration
+    totalRcvWaitTime: Duration
+    sendIdleStarted: MonoTime
+    totalIdleTime: Duration
 
-const kMaxSendingBytes = 65536
+const kMaxSendingBytes = 500 * 1024
     ## Max number of bytes written to the socket that haven't been acknowledged yet
     ## (by the WebSocket's send future completing.)
 
 proc newWebSocketTransport*(socket: WebSocket): WebSocketTransport =
     ## Wraps a Transport around an existing WebSocket object.
-    WebSocketTransport(socket: socket)
+    WebSocketTransport(socket: socket, startTime: getMonoTime())
 
 proc protocolName(subprotocol: string): string =
     result = BLIPWebSocketProtocol
@@ -90,6 +100,11 @@ method disconnect*(t: WebSocketTransport) =
     t.socket.close()
 
 method close*(t: WebSocketTransport) {.async.} =
+    let openTime = getMonoTime() - t.startTime
+    let openMs = openTime.inMilliseconds
+    let sbps = int(t.bytesSent) * 1000 / int(openMs)
+    let rbps = int(t.bytesRcvd) * 1000 / int(openMs)
+    log Info, "Closing WebSocket ...\nSent {t.bytesSent} bytes in {openMs} ms, {sbps:.0f} bytes/sec ... send buffer was empty for {t.totalIdleTime.inMilliseconds} ms, full for {t.totalSendWaitTime.inMilliseconds} ms\nReceived {t.bytesRcvd} bytes, {rbps:.0f} bytes/sec ... receiver spent {t.totalRcvWaitTime.inMilliseconds} ms waiting"
     await t.socket.shutdown()
 
 method canSend*(t: WebSocketTransport): bool =
@@ -105,8 +120,16 @@ method send*(t: WebSocketTransport; frame: fixseq[byte]): Future[void] =
         result.fail(t.sendError)
         return
 
+    if t.sendingBytes == 0 and t.sendIdleStarted.ticks != 0:
+        let idleTime = getMonoTime() - t.sendIdleStarted
+        t.totalIdleTime += idleTime
+        let idleUs = idleTime.inMicroseconds
+        if idleUs > 10000:
+            log Verbose, "Transport send was idle for {idleUs} µs"
+
     let byteCount = frame.len
     t.sendingBytes += byteCount
+    t.bytesSent += uint64(byteCount)
 
     log Debug, "Transport sending {byteCount} bytes"
     t.socket.send(frame.toString, Opcode.Binary).addCallback proc(f: Future[void]) =
@@ -115,9 +138,18 @@ method send*(t: WebSocketTransport; frame: fixseq[byte]): Future[void] =
             t.sendingBytes -= byteCount
             let waiter = t.sendWaiter
             if t.sendingBytes < kMaxSendingBytes and waiter != nil:
-                log Verbose, "Transport is un-blocking (sendingBytes={t.sendingBytes})"
+
+                let wait = getMonoTime() - t.sendWaitStarted
+                t.totalSendWaitTime += wait
+                if wait.inMilliseconds > 1:
+                    log Info, "Transport is un-blocking after {wait.inMicroseconds} µs (sendingBytes={t.sendingBytes})"
+
                 t.sendWaiter = nil
                 waiter.complete()
+
+            if t.sendingBytes == 0:
+                log Verbose, "Transport is idle!"
+                t.sendIdleStarted = getMonoTime()
         else:
             if f.error.name == "WebSocketClosedError" and t.socket.readyState >= Closing:
                 log Verbose, "Transport closed cleanly"
@@ -133,12 +165,20 @@ method send*(t: WebSocketTransport; frame: fixseq[byte]): Future[void] =
     else:
         assert t.sendWaiter == nil
         t.sendWaiter = result
+        t.sendWaitStarted = getMonoTime()
         log Verbose, "Transport is blocking (sendingBytes={t.sendingBytes})"
 
 
 method receive*(t: WebSocketTransport): Future[fixseq[byte]] {.async.} =
     while t.socket.readyState == Open:
+        let start = getMonoTime()
         let packet = await t.socket.receivePacket()
+        let rcvTime = getMonoTime() - start
+        t.totalRcvWaitTime += rcvTime
+        if rcvTime.inMilliseconds >= 100:
+            log Warning, "Transport.receive waited {rcvTime.inMicroseconds} µs; total is {t.totalRcvWaitTime}"
+
+        t.bytesRcvd += uint64(packet.data.len)
         case packet.kind
             of Binary:
                 return packet.data.toFixseq

@@ -154,6 +154,8 @@ proc sendLoop(blip: Blip) {.async.} =
             let msg = await blip.outbox.pop()
             if msg == nil:
                 return
+            if int(msg.number) mod 100 == 0:
+                log Info, "---- sending msg #{int(msg.number)} ----" #TEMP
             let frameSize = if (msg.priority == Urgent or blip.outbox.empty): 32768 else: 4096
             var buffer = blip.outBuffer[0 ..< frameSize]
             buffer.clear()

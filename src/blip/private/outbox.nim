@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import protocol
+import protocol, log
 import asyncdispatch, deques
 
 type Outbox*[T] = object
@@ -24,6 +24,7 @@ type Outbox*[T] = object
     queue: Deque[T]
     waiting: Future[T]
     closed: bool
+    maxDepth: int
 
 func empty*[T](ob: Outbox[T]): bool =
     return ob.queue.len == 0
@@ -44,6 +45,7 @@ proc push*[T](ob: var Outbox[T], msg: T) =
             ob.queue.addFirst(msg)
         else:
             ob.queue.addLast(msg)
+        ob.maxDepth = max(ob.maxDepth, ob.queue.len)
         #TODO: Implement special placement of urgent messages [BLIP 3.2]
 
 proc pop*[T](ob: var Outbox[T]): Future[T] =
@@ -74,6 +76,7 @@ proc close*[T](ob: var Outbox[T]) =
         let f = ob.waiting
         ob.waiting = nil
         f.complete(nil)
+    log Info, "Outbox max depth was {ob.maxDepth}"
 
 func isClosed*[T](ob: Outbox[T]): bool =
     return ob.closed

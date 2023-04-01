@@ -7,11 +7,11 @@ license       = "Apache-2.0"
 srcDir        = "src"
 binDir        = "bin"
 installExt    = @["nim"]
-bin           = @["../examples/server", "../examples/client"]
+bin           = @["../examples/sync"]  # , "../examples/server", "../examples/client"]
 
 # Dependencies
 
 requires "nim >= 1.2.0"
 
-requires "news >= 0.5.0"
+requires "news >= 0.6"
 requires "zip  >= 0.2.1"

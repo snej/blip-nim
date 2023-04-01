@@ -1,3 +1,4 @@
 bin
 /examples/client
 /examples/server
+examples/sync
