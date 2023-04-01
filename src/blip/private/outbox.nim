@@ -75,6 +75,12 @@ proc close*[T](ob: var Outbox[T]) =
         ob.waiting = nil
         f.complete(nil)
 
+func isClosed*[T](ob: Outbox[T]): bool =
+    return ob.closed
+
+
+######## ICEBOX
+
 
 type Icebox*[T] = object
     ## A set of outgoing messages that are blocked waiting for acknowledgement from the peer.
@@ -93,3 +99,6 @@ func find*[T](ib: Icebox[T]; msgType: MessageType; msgNo: MessageNo): (int, T) =
 
 proc del*(ib: var Icebox, i: int) =
     ib.messages.del(i)
+
+func empty*(ib: Icebox): bool =
+    return ib.messages.len == 0

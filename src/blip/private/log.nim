@@ -18,6 +18,7 @@
 ## (I didn't use the standard-library one because it uses globals, which async is allergic to.)
 
 import strformat, strmisc
+import std/monotimes, std/times
 
 type LogLevel* = enum
     Error,
@@ -28,9 +29,16 @@ type LogLevel* = enum
 
 var CurrentLogLevel* = LogLevel.Warning
 
+var startTime = getMonoTime()
+
+proc timestamp(): string =
+    let t = float64((getMonoTime() - startTime).inMicroseconds) / 1.0e6
+    return &"{t :011.7f}"
+
+
 template log*(level: LogLevel, message: typed) =
     if level <= CurrentLogLevel:
-        echo "BLIP ", $level, ": ", &message
+        echo timestamp(), " | BLIP ", $level, ": ", &message
 
 template logException*(e: ref Exception, message: typed) =
     if Error <= CurrentLogLevel:

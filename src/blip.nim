@@ -36,6 +36,7 @@ type
         inCodec: Inflater                   # Decompresses incoming frames
         defaultHandler: Handler             # Default callback to handle incoming requests
         handlers: Table[string, Handler]    # Callbacks for requests with specific "Profile"s
+        shouldCloseWhenIdle: bool           # When true, will close when isIdle becomes true
 
     Blip* = ref BlipObj
         ## A BLIP connection.
@@ -66,12 +67,49 @@ proc setDefaultHandler*(blip: Blip, handler: Handler) =
     ## Registers a callback that will receive incoming messages not processed by other handlers.
     blip.defaultHandler = handler
 
-proc close*(blip: Blip) =
+func isIdle*(blip: Blip): bool =
+    ## True if there are no messages being sent or received.
+    return blip.incomingResponses.len == 0 and blip.incomingRequests.len == 0 and
+           blip.outbox.empty and blip.icebox.empty
+
+func isClosed*(blip: Blip): bool =
+    return blip.outbox.isClosed
+
+proc i_close(blip: Blip) =
     ## Shuts down the Blip object.
-    log Info, "Closing by request..."
     blip.outbox.close()
     asyncCheck blip.socket.close()
 
+proc close*(blip: Blip) =
+    ## Shuts down the Blip object.
+    if not blip.isClosed:
+        log Info, "Closing by request..."
+        blip.i_close()
+
+proc closeIfIdle*(blip: Blip): bool =
+    ## If the Blip object is idle (no messages incoming or outgoing), closes it and returns true.
+    if blip.isClosed:
+        return true
+    elif blip.isIdle:
+        log Info, "Closing idle Blip connection..."
+        blip.i_close()
+        return true
+    else:
+        return false
+
+proc closeWhenIdle*(blip: Blip) =
+    ## The Blip object will be closed as soon as it goes idle.
+    ## If it's already idle, it's closed immediately.
+    if not blip.closeIfIdle():
+        blip.shouldCloseWhenIdle = true
+        log Verbose, "Blip connection will close ASAP"
+
+proc checkIdleClose(blip: Blip): bool =
+    if blip.shouldCloseWhenIdle:
+        if blip.closeIfIdle():
+            return true
+        log Debug, "(Not idle yet; still waiting)"
+    return false
 
 # Sending:
 
@@ -112,8 +150,7 @@ proc sendLoop(blip: Blip) {.async.} =
     ## Async loop that processes messages in the outbox and sends them as WebSocket messages,
     ## until the connection is closed.
     try:
-        var pending: Deque[Future[void]]
-        while blip.socket.canSend:
+        while not blip.checkIdleClose() and blip.socket.canSend:
             let msg = await blip.outbox.pop()
             if msg == nil:
                 return
@@ -133,7 +170,7 @@ proc sendLoop(blip: Blip) {.async.} =
             if f.failed:
                 logException f.error, "sending frame"
                 break
-    except Exception as x:
+    except CatchableError as x:
         logException x, "in sendLoop"
     log Debug, "sendLoop is done"
 
@@ -141,7 +178,7 @@ proc sendLoop(blip: Blip) {.async.} =
 # Receiving:
 
 proc pendingRequest(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
-    ## Returns the MessageIn for an incoming request frame.
+    ## Returns the MessageIn for an incoming _request_ frame.
     if msgNo == blip.inNumber + 1:
         # This is the start of a new request:
         blip.inNumber = msgNo
@@ -161,7 +198,7 @@ proc pendingRequest(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
        raise newException(BlipException, "Invalid incoming message number (too high)")
 
 proc pendingResponse(blip: Blip, flags: byte, msgNo: MessageNo): MessageIn =
-    ## Returns the MessageIn for an incoming response frame.
+    ## Returns the MessageIn for an incoming _response_ frame.
     # Look up the response object with this number:
     let msg = blip.incomingResponses.getOrDefault(msgNo)
     if msg == nil:
@@ -210,10 +247,10 @@ proc handleFrame(blip: Blip, frame: fixseq[byte]) =
     if msgType < kAckRequestType:
         # Handle an incoming request/response frame:
         # Look up or create the IncomingMessage object:
-        let msg = if msgType == kRequestType:
+        let msg = (if msgType == kRequestType:
             blip.pendingRequest(flags, msgNo)
         else:
-            blip.pendingResponse(flags, msgNo)
+            blip.pendingResponse(flags, msgNo))
         # Append the frame to the message, and dispatch it if it's complete:
         let ack = msg.addFrame(flags, frame, blip.inBuffer, blip.inCodec)
         if ack != nil:
@@ -240,7 +277,7 @@ proc handleFrame(blip: Blip, frame: fixseq[byte]) =
 proc receiveLoop(blip: Blip) {.async.} =
     ## Async loop that receives WebSocket messages and passes them to `handleFrame`,
     ## until the socket closes.
-    while blip.socket.canReceive:
+    while not blip.checkIdleClose() and blip.socket.canReceive:
         var frame: fixseq[byte]
         try:
             frame = await blip.socket.receive()

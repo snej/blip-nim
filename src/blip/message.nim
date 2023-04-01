@@ -241,7 +241,7 @@ proc intProperty*(msg: MessageIn; key: string; defaultValue: int = 0): int =
     if stringVal != "":
         try:
             return stringVal.parseInt()
-        except:
+        except ValueError:
             discard
     return defaultValue
 
